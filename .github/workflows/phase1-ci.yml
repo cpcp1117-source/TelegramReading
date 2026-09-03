@@ -63,7 +63,7 @@ jobs:
       - name: Clean build and startup
         run: docker compose up --build --wait --wait-timeout 180 -d
       - name: Scan application image
-        uses: aquasecurity/trivy-action@0.36.0
+        uses: aquasecurity/trivy-action@0.35.0
         with:
           image-ref: telegram-trader-phase1-app:phase1
           format: table
