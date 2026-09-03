@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -30,6 +31,9 @@ def test_invalid_message_identity_fails_closed() -> None:
     with pytest.raises(ValueError, match="sequence"):
         MockTelegramMessage("channel", 1, 0, 0, "invalid")
 
+    with pytest.raises(ValueError, match="reply_to_message_id"):
+        MockTelegramMessage("channel", 1, 0, 1, "invalid", reply_to_message_id=0)
+
 
 def test_fixture_requires_array() -> None:
     with pytest.raises(ValueError, match="JSON array"):
@@ -52,3 +56,13 @@ def test_fixture_loads_messages() -> None:
     )
     assert messages == [MockTelegramMessage("mock", 1, 0, 1, "synthetic")]
     assert messages[0].audit_payload()["text"] == "synthetic"
+
+
+def test_repository_fixture_covers_edit_reply_and_duplicate() -> None:
+    fixture_path = Path(__file__).parents[1] / "fixtures" / "mock_messages.json"
+    messages = load_fixture(fixture_path.read_text(encoding="utf-8"))
+
+    assert len(messages) == 4
+    assert messages[1].edit_version == 1
+    assert messages[2].reply_to_message_id == 1001
+    assert messages[2].source_event_id == messages[3].source_event_id

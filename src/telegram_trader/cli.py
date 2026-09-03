@@ -11,7 +11,7 @@ from sqlalchemy import func, select
 from telegram_trader.config import get_settings
 from telegram_trader.db import create_db_engine, create_session_factory
 from telegram_trader.mock_telegram import MockMessageProcessor, MockTelegramMessage, load_fixture
-from telegram_trader.models import AuditEvent, MockMessageReceipt
+from telegram_trader.models import AuditEvent, MockMessageReceipt, OutboxEvent
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -27,6 +27,7 @@ def _parser() -> argparse.ArgumentParser:
     emit.add_argument("--channel-id", default="mock-channel")
     emit.add_argument("--message-id", type=int, required=True)
     emit.add_argument("--edit-version", type=int, default=0)
+    emit.add_argument("--reply-to-message-id", type=int)
     emit.add_argument("--sequence", type=int, required=True)
     emit.add_argument("--text", required=True)
 
@@ -62,6 +63,7 @@ def main() -> int:
                 edit_version=args.edit_version,
                 sequence=args.sequence,
                 text=args.text,
+                reply_to_message_id=args.reply_to_message_id,
             )
             _print(asdict(processor.process(message)))
             return 0
@@ -73,12 +75,14 @@ def main() -> int:
                 .where(MockMessageReceipt.consumer_name == args.consumer)
             )
             audit_count = session.scalar(select(func.count()).select_from(AuditEvent))
+            outbox_count = session.scalar(select(func.count()).select_from(OutboxEvent))
         _print(
             {
                 "consumer": args.consumer,
                 "checkpoint": processor.checkpoint(),
                 "receipt_count": receipt_count,
                 "audit_count": audit_count,
+                "outbox_count": outbox_count,
             }
         )
         return 0

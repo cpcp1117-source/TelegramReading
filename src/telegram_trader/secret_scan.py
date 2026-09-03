@@ -9,7 +9,9 @@ EXCLUDED_PARTS = {
     ".git-sandbox-init-backup",
     ".mypy_cache",
     ".pytest_cache",
+    ".pytest_tmp",
     ".ruff_cache",
+    ".uv-cache",
     ".venv",
     "__pycache__",
     "htmlcov",
@@ -50,7 +52,8 @@ PLACEHOLDERS = {
 
 def iter_text_files(root: Path) -> Iterable[Path]:
     for path in root.rglob("*"):
-        if not path.is_file() or any(part in EXCLUDED_PARTS for part in path.parts):
+        relative_parts = path.relative_to(root).parts
+        if not path.is_file() or any(part in EXCLUDED_PARTS for part in relative_parts):
             continue
         if path.name == ".env.example" or path.suffix.lower() in TEXT_SUFFIXES:
             yield path

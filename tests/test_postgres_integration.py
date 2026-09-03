@@ -7,8 +7,9 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from sqlalchemy import Engine, func, select, text
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy import Engine, event, func, select, text
+from sqlalchemy.exc import DBAPIError, IntegrityError
+from sqlalchemy.orm import Session
 
 from telegram_trader import cli as cli_module
 from telegram_trader.config import Settings, get_settings
@@ -18,7 +19,14 @@ from telegram_trader.mock_telegram import (
     MockTelegramMessage,
     SequenceGapError,
 )
-from telegram_trader.models import AuditEvent, ConsumerCheckpoint, MockMessageReceipt
+from telegram_trader.models import (
+    AuditEvent,
+    ConsumerCheckpoint,
+    MockMessageReceipt,
+    OutboxDeliveryReceipt,
+    OutboxEvent,
+)
+from telegram_trader.outbox import OutboxConsumer
 
 pytestmark = pytest.mark.integration
 
@@ -32,8 +40,9 @@ def engine() -> Iterator[Engine]:
     with active_engine.begin() as connection:
         connection.execute(
             text(
-                "TRUNCATE TABLE mock_message_receipts, consumer_checkpoints, "
-                "audit_events RESTART IDENTITY CASCADE"
+                "TRUNCATE TABLE outbox_delivery_receipts, outbox_events, "
+                "mock_message_receipts, consumer_checkpoints, audit_events "
+                "RESTART IDENTITY CASCADE"
             )
         )
     yield active_engine
@@ -53,6 +62,7 @@ def test_replay_is_idempotent(engine: Engine) -> None:
     assert first.source_event_id == second.source_event_id
     with factory() as session:
         assert session.scalar(select(func.count()).select_from(AuditEvent)) == 1
+        assert session.scalar(select(func.count()).select_from(OutboxEvent)) == 1
         assert session.scalar(select(func.count()).select_from(MockMessageReceipt)) == 1
 
 
@@ -82,6 +92,69 @@ def test_sequence_gap_fails_closed_without_advancing_checkpoint(engine: Engine) 
     assert processor.checkpoint() == 0
 
 
+def test_crash_before_commit_rolls_back_audit_outbox_receipt_and_checkpoint(
+    engine: Engine,
+) -> None:
+    factory = create_session_factory(engine)
+    processor = MockMessageProcessor(factory, f"crash-before-{uuid.uuid4()}")
+
+    def fail_before_commit(_session: Session) -> None:
+        raise RuntimeError("simulated crash before commit")
+
+    event.listen(factory.class_, "before_commit", fail_before_commit)
+    try:
+        with pytest.raises(RuntimeError, match="simulated crash before commit"):
+            processor.process(MockTelegramMessage("mock", 1, 0, 1, "not committed"))
+    finally:
+        event.remove(factory.class_, "before_commit", fail_before_commit)
+
+    with factory() as session:
+        assert session.scalar(select(func.count()).select_from(AuditEvent)) == 0
+        assert session.scalar(select(func.count()).select_from(OutboxEvent)) == 0
+        assert session.scalar(select(func.count()).select_from(MockMessageReceipt)) == 0
+        assert session.scalar(select(func.count()).select_from(ConsumerCheckpoint)) == 0
+
+
+def test_crash_after_commit_replay_is_a_no_op(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    consumer = f"crash-after-{uuid.uuid4()}"
+    message = MockTelegramMessage("mock", 1, 0, 1, "committed")
+    first = MockMessageProcessor(factory, consumer).process(message)
+
+    replay = MockMessageProcessor(factory, consumer).process(message)
+
+    assert replay.duplicate is True
+    assert replay.outbox_event_id == first.outbox_event_id
+    with factory() as session:
+        assert session.scalar(select(func.count()).select_from(AuditEvent)) == 1
+        assert session.scalar(select(func.count()).select_from(OutboxEvent)) == 1
+        assert session.scalar(select(func.count()).select_from(MockMessageReceipt)) == 1
+
+
+def test_outbox_delivery_is_idempotent_per_consumer(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    produced = MockMessageProcessor(factory, f"producer-{uuid.uuid4()}").process(
+        MockTelegramMessage("mock", 1, 0, 1, "deliver once")
+    )
+    first_consumer = OutboxConsumer(factory, f"consumer-a-{uuid.uuid4()}")
+    second_consumer = OutboxConsumer(factory, f"consumer-b-{uuid.uuid4()}")
+
+    assert first_consumer.acknowledge(produced.outbox_event_id).duplicate is False
+    assert first_consumer.acknowledge(produced.outbox_event_id).duplicate is True
+    assert second_consumer.acknowledge(produced.outbox_event_id).duplicate is False
+    with factory() as session:
+        assert session.scalar(select(func.count()).select_from(OutboxDeliveryReceipt)) == 2
+
+
+def test_database_constraint_rejects_negative_checkpoint(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    with (
+        pytest.raises(IntegrityError, match="ck_checkpoint_non_negative"),
+        factory.begin() as session,
+    ):
+        session.add(ConsumerCheckpoint(consumer_name="invalid", last_sequence=-1))
+
+
 def test_audit_event_cannot_be_updated_or_deleted(engine: Engine) -> None:
     factory = create_session_factory(engine)
     consumer = f"audit-{uuid.uuid4()}"
@@ -92,6 +165,24 @@ def test_audit_event_cannot_be_updated_or_deleted(engine: Engine) -> None:
         connection.execute(
             text("UPDATE audit_events SET event_type='changed' WHERE event_id=:event_id"),
             {"event_id": result.audit_event_id},
+        )
+
+    with engine.connect() as connection, pytest.raises(DBAPIError, match="append-only"):
+        connection.execute(
+            text("DELETE FROM audit_events WHERE event_id=:event_id"),
+            {"event_id": result.audit_event_id},
+        )
+
+    with engine.connect() as connection, pytest.raises(DBAPIError, match="append-only"):
+        connection.execute(
+            text("UPDATE outbox_events SET event_type='changed' WHERE event_id=:event_id"),
+            {"event_id": result.outbox_event_id},
+        )
+
+    with engine.connect() as connection, pytest.raises(DBAPIError, match="append-only"):
+        connection.execute(
+            text("DELETE FROM outbox_events WHERE event_id=:event_id"),
+            {"event_id": result.outbox_event_id},
         )
 
     with factory() as session:
@@ -129,6 +220,7 @@ def test_cli_emit_and_inspect(engine: Engine, monkeypatch, capsys) -> None:  # t
     output = capsys.readouterr().out
     assert '"checkpoint": 1' in output
     assert '"receipt_count": 1' in output
+    assert '"outbox_count": 1' in output
     get_settings.cache_clear()
 
 

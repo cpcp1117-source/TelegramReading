@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from telegram_trader.audit import append_audit_event
 from telegram_trader.models import ConsumerCheckpoint, MockMessageReceipt
+from telegram_trader.outbox import append_outbox_event
 
 
 class SequenceGapError(ValueError):
@@ -23,6 +24,7 @@ class MockTelegramMessage:
     edit_version: int
     sequence: int
     text: str
+    reply_to_message_id: int | None = None
 
     def __post_init__(self) -> None:
         if not self.channel_id.strip():
@@ -33,6 +35,8 @@ class MockTelegramMessage:
             raise ValueError("edit_version must be non-negative")
         if self.sequence <= 0:
             raise ValueError("sequence must be positive")
+        if self.reply_to_message_id is not None and self.reply_to_message_id <= 0:
+            raise ValueError("reply_to_message_id must be positive")
 
     @property
     def source_event_id(self) -> str:
@@ -51,6 +55,7 @@ class MockTelegramMessage:
 class ProcessResult:
     source_event_id: str
     audit_event_id: str
+    outbox_event_id: str
     duplicate: bool
     checkpoint: int
 
@@ -66,6 +71,9 @@ class MockMessageProcessor:
         audit_event_id = hashlib.sha256(
             f"mock-message-received:{message.source_event_id}".encode()
         ).hexdigest()
+        outbox_event_id = hashlib.sha256(
+            f"outbox:mock-message-received:{message.source_event_id}".encode()
+        ).hexdigest()
         with self._session_factory.begin() as session:
             existing = session.get(MockMessageReceipt, message.source_event_id)
             if existing is not None:
@@ -73,6 +81,7 @@ class MockMessageProcessor:
                 return ProcessResult(
                     source_event_id=existing.source_event_id,
                     audit_event_id=existing.audit_event_id,
+                    outbox_event_id=outbox_event_id,
                     duplicate=True,
                     checkpoint=checkpoint,
                 )
@@ -97,6 +106,14 @@ class MockMessageProcessor:
                 aggregate_id=message.source_event_id,
                 payload=message.audit_payload(),
             )
+            append_outbox_event(
+                session,
+                event_id=outbox_event_id,
+                event_type="mock.telegram.message.received.v1",
+                aggregate_type="mock_message",
+                aggregate_id=message.source_event_id,
+                payload=message.audit_payload(),
+            )
             session.add(
                 MockMessageReceipt(
                     source_event_id=message.source_event_id,
@@ -104,6 +121,7 @@ class MockMessageProcessor:
                     channel_id=message.channel_id,
                     message_id=message.message_id,
                     edit_version=message.edit_version,
+                    reply_to_message_id=message.reply_to_message_id,
                     sequence_no=message.sequence,
                     content_hash=message.content_hash,
                     audit_event_id=audit_event_id,
@@ -121,6 +139,7 @@ class MockMessageProcessor:
         return ProcessResult(
             source_event_id=message.source_event_id,
             audit_event_id=audit_event_id,
+            outbox_event_id=outbox_event_id,
             duplicate=False,
             checkpoint=message.sequence,
         )

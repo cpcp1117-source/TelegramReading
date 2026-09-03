@@ -5,13 +5,14 @@
 ## Current Status
 
 - Completed phase: `Phase 0 — Requirements and Architecture`
-- Gate status: `READY + USER_ACCEPTED`
-- Runtime code: 尚未建立
+- Active phase: `Phase 1 — Offline Foundation`
+- Gate status: `Phase 0 READY + USER_ACCEPTED`; `Gate 1 verification in progress`
+- Runtime code: Phase 1 offline-only skeleton exists
 - External credentials: 不需要，且不得加入工作區
-- Git branch: `phase/0-requirements-architecture`
+- Git branch: `phase/1-offline-foundation`
 - Git remote: `https://github.com/cpcp1117-source/TelegramReading.git`
 - Initial channel scope: only `@followgerry`; future channels require separate onboarding after the current system is stable
-- Next permitted action: create `phase-0-accepted` tag, then begin Phase 1 on an independent branch
+- Next permitted action: complete Gate 1 evidence and obtain explicit user acceptance
 
 ## Phase 0 Deliverables
 
@@ -61,10 +62,14 @@ No Telegram、Binance or OpenAI SDK/client exists in this phase.
 ### Docker Compose
 
 ```powershell
+$dbCredential = [Guid]::NewGuid().ToString("N")
+Set-Item -Path Env:POSTGRES_PASSWORD -Value $dbCredential
 docker compose up --build -d
 docker compose ps
 Invoke-RestMethod http://127.0.0.1:8080/health/ready
 ```
+
+`POSTGRES_PASSWORD` 只存在目前 terminal process；不得寫入 repository 或測試報告。
 
 ### PostgreSQL Integration Tests
 
