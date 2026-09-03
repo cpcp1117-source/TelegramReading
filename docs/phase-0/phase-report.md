@@ -12,7 +12,7 @@
 - **Runtime Code / External Integration:** None
 - **Credentials Used:** None
 - **Gate Verdict:** `READY`
-- **User Acceptance:** `PENDING`
+- **User Acceptance:** `ACCEPTED` on 2026-09-03
 
 ## 2. Completed Work
 
@@ -30,9 +30,9 @@
 | Telegram/Binance API Contract Inventory | Complete |
 | Domain Glossary | Complete |
 | Delivery Quality Review | Complete; `Ready` with 0 Critical、0 Major、0 Minor |
-| ADR-0001 Sequential Stage Gates | Proposed, pending Gate acceptance |
-| ADR-0002 Separate Credential Boundaries | Proposed, pending Gate acceptance |
-| ADR-0003 Deterministic Trade Authority | Proposed, pending Gate acceptance |
+| ADR-0001 Sequential Stage Gates | Accepted |
+| ADR-0002 Separate Credential Boundaries | Accepted |
+| ADR-0003 Deterministic Trade Authority | Accepted |
 
 ## 3. Not Implemented by Design
 
@@ -107,16 +107,16 @@ Tracked future TBDs are not classified as Phase 0 defects because each has an ow
 
 ## 8. Gate Decision
 
-The Phase 0 document package, required Phase branch, initial channel record and re-review are complete. The Gate is ready for explicit user acceptance. No Phase 1 implementation is authorized before that acceptance.
+The Phase 0 document package, required Phase branch, initial channel record and re-review are complete. The user explicitly accepted Specification v0.2 and authorized Phase 1 Offline Foundation.
 
 ```text
 Gate Verdict: READY
-User Acceptance: PENDING
-Next Phase: BLOCKED UNTIL USER_ACCEPTED
+User Acceptance: ACCEPTED
+Next Phase: PHASE_1_AUTHORIZED
 ```
 
 ## 9. Handoff
 
-- **Next Owner:** User / Acceptance Owner
-- **Required Action:** Explicitly accept or reject Phase 0 Specification v0.2.
-- **After Re-review and Acceptance Only:** Initialize/confirm Phase 1 branch and implement offline foundation.
+- **Next Owner:** Technical Owner
+- **Required Action:** Create accepted tag/main baseline and implement Phase 1 Offline Foundation on an independent branch.
+- **Boundary:** Phase 2 credentials and Telegram integration remain prohibited until Gate 1 acceptance.

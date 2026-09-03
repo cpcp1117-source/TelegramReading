@@ -1,6 +1,6 @@
 # ADR-0002: Separate Telegram, AI, Control, and Execution Credential Boundaries
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-02
 - **Owners:** Security Owner（待確認）、Technical Owner（待確認）
 

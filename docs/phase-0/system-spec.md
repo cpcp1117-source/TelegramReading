@@ -7,7 +7,7 @@
 - **Date:** 2026-09-03
 - **Target Audience:** User / Acceptance Owner、Product/Technical Architect、Backend Engineer、QA、Security/Operations Reviewer
 - **Source Basis:** 使用者確認的 Sequential Development and Stage-Gate Plan、Phase 0 discovery、Telegram/Binance 官方文件
-- **Document Status:** Specification v0.2；Gate 0 `READY`，等待 User Acceptance
+- **Document Status:** Accepted；Gate 0 `READY + USER_ACCEPTED`
 - **Implementation State:** Greenfield；沒有 runtime code、database、Docker 或 external credentials
 
 ### Revision History
@@ -15,7 +15,7 @@
 | Version | Date | Author / Owner | Change Summary | Status |
 |---|---|---|---|---|
 | v0.1 | 2026-09-02 | Codex / User | Phase 0 初版整合規格 | Ready for review |
-| v0.2 | 2026-09-03 | Codex / User | 登錄首個 Source Channel；將 symbol policy 明確化為 static 或 exchange-validated dynamic scope | Draft; Gate 0 re-review |
+| v0.2 | 2026-09-03 | Codex / User | 登錄首個 Source Channel；將 symbol policy 明確化為 static 或 exchange-validated dynamic scope | Accepted by User |
 
 ### Document Conventions
 
@@ -231,7 +231,7 @@ Architecture is defined in [architecture.md](architecture.md). Confirmed boundar
 - PostgreSQL stores domain records and transactional outbox; no Redis/RabbitMQ in MVP.
 - Runtime external side effects are disabled by phase feature gates and default `PAUSED` control state.
 
-Proposed ADRs are listed under [docs/adr](../adr/) and become Accepted only after Gate 0 user acceptance.
+Accepted ADRs are listed under [docs/adr](../adr/) and are fixed by the Gate 0 user acceptance record.
 
 ## 8. Data Model
 
@@ -401,7 +401,7 @@ All `FR-001`–`FR-025` and `NFR-001`–`NFR-014` are mapped in [acceptance-trac
 - **Open Questions:** TBD-003–TBD-009；TBD-001/TBD-002 已對 Phase 0 初始範圍解決並於新增頻道時重新開啟
 - **Risks / Dependencies:** Telegram content terms、signal ambiguity、aggressive risk、contract drift
 - **Next Owner:** User / Acceptance Owner
-- **Verification Required:** Review [Gate 0 Checklist](gate-0-checklist.md) and explicitly accept or reject Specification v0.2；Phase 1 remains blocked until acceptance
+- **Verification Required:** Completed；Phase 1 is authorized under ADR-0001 and remains limited to Offline Foundation
 
 ## References
 

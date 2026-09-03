@@ -32,7 +32,7 @@
 
 - Architecture minimizes components, isolates credentials and preserves deterministic trade authority.
 - Logical data model covers identity, versions, lifecycles, idempotency, audit and environment isolation without premature SQL DDL.
-- ADRs appropriately remain `Proposed` until user acceptance.
+- ADR-0001–ADR-0003 are accepted with the recorded Gate 0 user acceptance.
 - No architecture contradiction found in the document package. The Phase branch governance requirement is now active and verified.
 
 ## Validation Evidence and Operational Risk
@@ -56,4 +56,4 @@
 - **Next Owner:** User / Acceptance Owner
 - **Required Fixes:** None
 - **Evidence Required for Re-review:** Complete
-- **Human Acceptance Decision:** `PENDING` explicit approval of Specification v0.2；Phase 1 remains prohibited until `USER_ACCEPTED`
+- **Human Acceptance Decision:** `ACCEPTED` on 2026-09-03 for Specification v0.2；Phase 1 Offline Foundation authorized

@@ -1,6 +1,6 @@
 # ADR-0001: Enforce Sequential Stage Gates
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-02
 - **Owners:** User（Acceptance Owner）、Technical Owner（待確認）
 

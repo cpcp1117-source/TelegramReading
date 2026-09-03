@@ -2,7 +2,7 @@
 
 - **Version:** v0.1
 - **Date:** 2026-09-03
-- **Status:** Proposed; becomes accepted only with Gate 0 user acceptance
+- **Status:** Accepted with Gate 0 user acceptance on 2026-09-03
 - **Implementation Evidence:** None; Phase 0 architecture only
 
 ## 1. Architecture Principles

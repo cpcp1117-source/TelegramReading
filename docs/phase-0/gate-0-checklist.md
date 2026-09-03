@@ -2,8 +2,8 @@
 
 - **Gate:** Phase 0 — Requirements and Architecture
 - **Current Verdict:** `READY`
-- **User Acceptance:** `PENDING`
-- **Next Phase Permission:** `DENIED` until explicit user acceptance
+- **User Acceptance:** `ACCEPTED`
+- **Next Phase Permission:** `GRANTED` for Phase 1 Offline Foundation only
 
 ## 1. Deliverables
 
@@ -78,7 +78,7 @@ The Phase 0 initial inventory is exactly one channel: `@followgerry`. Its requir
 4. At least one anonymized representative message for Gate 0 scope confirmation（Gate 3 before implementation requires 20 fixtures/channel）。
 5. `ACCESS/AUTOMATION/AI_PROCESSING/MEDIA_STORAGE` status as `UNKNOWN/PENDING/GRANTED/REVOKED`; no evidence secret is needed now.
 
-The re-review is clean and the verdict is `READY FOR USER ACCEPTANCE`. This does not authorize Phase 1 until the acceptance record is explicitly completed by the user.
+The re-review is clean and the user explicitly accepted Specification v0.2 on 2026-09-03. Phase 1 Offline Foundation is authorized; later Phase capabilities remain prohibited.
 
 ## 6. User Review Points
 
@@ -98,10 +98,10 @@ To be completed only after explicit user response:
 
 | Field | Value |
 |---|---|
-| Decision | `PENDING / ACCEPTED / REJECTED` |
+| Decision | `ACCEPTED` |
 | Acceptance Owner | User |
-| Date |  |
-| Accepted Specification Version |  |
-| Conditions / Revisions Required |  |
+| Date | 2026-09-03 |
+| Accepted Specification Version | v0.2 |
+| Conditions / Revisions Required | Initial channel is only `@followgerry`; additional channels wait until later stability and require independent onboarding. |
 
-The earlier implementation request and scope clarification do not themselves count as acceptance of Specification v0.2. Gate 0 is ready, but remains unaccepted until the user explicitly approves it.
+User acceptance evidence: “我驗收並批准 Phase 0 Specification v0.2，允許建立 `phase-0-accepted` tag，並開始 Phase 1。”

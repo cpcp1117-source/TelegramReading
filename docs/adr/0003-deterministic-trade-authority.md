@@ -1,6 +1,6 @@
 # ADR-0003: Keep Trade Authority Deterministic and Outside the LLM
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-02
 - **Owners:** User（Risk Owner）、Technical Owner（待確認）
 

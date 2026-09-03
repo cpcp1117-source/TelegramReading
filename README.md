@@ -4,14 +4,14 @@
 
 ## Current Status
 
-- Active phase: `Phase 0 — Requirements and Architecture`
-- Gate status: `READY`（等待使用者明確驗收）
+- Completed phase: `Phase 0 — Requirements and Architecture`
+- Gate status: `READY + USER_ACCEPTED`
 - Runtime code: 尚未建立
 - External credentials: 不需要，且不得加入工作區
 - Git branch: `phase/0-requirements-architecture`
 - Git remote: `https://github.com/cpcp1117-source/TelegramReading.git`
 - Initial channel scope: only `@followgerry`; future channels require separate onboarding after the current system is stable
-- Next permitted action: User accepts or rejects Phase 0 Specification v0.2
+- Next permitted action: create `phase-0-accepted` tag, then begin Phase 1 on an independent branch
 
 ## Phase 0 Deliverables
 
@@ -33,4 +33,4 @@
 
 ## Gate Rule
 
-Gate 0 re-review 為 `READY`，但 `User Acceptance` 仍為 `PENDING`。只有在使用者明確回覆批准後才會建立 `phase-0-accepted` tag 並開始 Phase 1；在此之前禁止建立 Python package、database migration、Docker Compose、API client 或任何交易功能。
+Gate 0 re-review 為 `READY`，使用者已於 2026-09-03 明確批准 Specification v0.2。Phase 1 必須在獨立 branch 僅開發 Offline Foundation；Telegram、Binance、OpenAI 與真實交易能力仍禁止。
