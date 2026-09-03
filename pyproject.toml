@@ -17,6 +17,12 @@ dependencies = [
   "uvicorn>=0.34,<1",
 ]
 
+[project.optional-dependencies]
+test = [
+  "pytest>=8.3,<9",
+  "pytest-cov>=6,<7",
+]
+
 [dependency-groups]
 dev = [
   "mypy>=1.15,<2",

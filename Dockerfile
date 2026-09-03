@@ -19,7 +19,7 @@ EXPOSE 8080
 CMD ["python", "-m", "telegram_trader.service"]
 
 FROM base AS test
-RUN pip install --no-cache-dir ".[dev]"
+RUN pip install --no-cache-dir ".[test]"
 COPY tests ./tests
 COPY scripts ./scripts
 CMD ["pytest"]

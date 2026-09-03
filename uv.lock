@@ -580,6 +580,12 @@ dependencies = [
     { name = "uvicorn" },
 ]
 
+[package.optional-dependencies]
+test = [
+    { name = "pytest" },
+    { name = "pytest-cov" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "mypy" },
@@ -594,9 +600,12 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.116,<1" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2,<4" },
     { name = "pydantic-settings", specifier = ">=2.8,<3" },
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=8.3,<9" },
+    { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=6,<7" },
     { name = "sqlalchemy", specifier = ">=2.0.38,<3" },
     { name = "uvicorn", specifier = ">=0.34,<1" },
 ]
+provides-extras = ["test"]
 
 [package.metadata.requires-dev]
 dev = [
