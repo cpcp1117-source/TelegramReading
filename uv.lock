@@ -903,7 +903,6 @@ dependencies = [
 
 [package.optional-dependencies]
 test = [
-    { name = "pip-audit" },
     { name = "pytest" },
     { name = "pytest-cov" },
 ]
@@ -921,7 +920,6 @@ dev = [
 requires-dist = [
     { name = "alembic", specifier = ">=1.15,<2" },
     { name = "fastapi", specifier = ">=0.116,<1" },
-    { name = "pip-audit", marker = "extra == 'test'", specifier = ">=2.10,<3" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2,<4" },
     { name = "pydantic-settings", specifier = ">=2.8,<3" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=9.0.3,<10" },

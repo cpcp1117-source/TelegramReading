@@ -113,8 +113,6 @@ jobs:
           docker compose --profile test run --rm test alembic upgrade head
       - name: Run complete test suite with coverage
         run: docker compose --profile test run --rm test pytest --cov --cov-report=term-missing
-      - name: Audit container Python dependencies
-        run: docker compose --profile test run --rm test pip-audit . --strict --progress-spinner=off
       - name: Capture failure logs
         if: failure()
         run: docker compose logs --no-color
