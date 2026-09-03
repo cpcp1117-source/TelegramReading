@@ -1,0 +1,16 @@
+[
+  {
+    "channel_id": "mock-channel-001",
+    "message_id": 1001,
+    "edit_version": 0,
+    "sequence": 1,
+    "text": "Synthetic market observation A"
+  },
+  {
+    "channel_id": "mock-channel-001",
+    "message_id": 1002,
+    "edit_version": 0,
+    "sequence": 2,
+    "text": "Synthetic market observation B"
+  }
+]

@@ -34,3 +34,43 @@
 ## Gate Rule
 
 Gate 0 re-review 為 `READY`，使用者已於 2026-09-03 明確批准 Specification v0.2。Phase 1 必須在獨立 branch 僅開發 Offline Foundation；Telegram、Binance、OpenAI 與真實交易能力仍禁止。
+
+## Phase 1 — Offline Foundation
+
+Active branch: `phase/1-offline-foundation`
+
+Phase 1 contains only an offline application skeleton:
+
+- Python 3.11 package with offline-only config validation.
+- PostgreSQL schema and Alembic migration.
+- Append-only audit events protected by a database trigger.
+- Deterministic mock Telegram event simulator and persisted checkpoints.
+- JSON structured logging with sensitive-key redaction.
+- HTTP liveness/readiness endpoints.
+- Docker Compose with an internal-only database network.
+- Ruff、mypy、pytest、coverage and repository secret scan commands.
+
+No Telegram、Binance or OpenAI SDK/client exists in this phase.
+
+### Local Static and Unit Checks
+
+```powershell
+.\scripts\ci.ps1
+```
+
+### Docker Compose
+
+```powershell
+docker compose up --build -d
+docker compose ps
+Invoke-RestMethod http://127.0.0.1:8080/health/ready
+```
+
+### PostgreSQL Integration Tests
+
+```powershell
+docker compose --profile test run --rm test alembic upgrade head
+docker compose --profile test run --rm test pytest --cov --cov-report=term-missing
+```
+
+Gate 1 remains unaccepted until all required evidence is recorded, the review verdict is `READY`, and the user explicitly accepts it.

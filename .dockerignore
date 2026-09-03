@@ -1,0 +1,15 @@
+.git
+.github
+.git-sandbox-init-backup
+.venv
+__pycache__
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+docs
+media
+secrets
+*.session
+*.session-journal
