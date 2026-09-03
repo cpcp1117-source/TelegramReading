@@ -24,8 +24,8 @@ Validation scope
 Machine result
 --------------
 
-MARKDOWN_FILES=17
-REQUIRED_ARTIFACTS=18
+MARKDOWN_FILES=18
+REQUIRED_ARTIFACTS=19
 MISSING_ARTIFACTS=0
 BROKEN_LOCAL_LINKS=0
 FR_UNIQUE=25
@@ -55,8 +55,21 @@ Interpretation
   Phase 0. This evidence does not prove Telegram, Binance, database, container,
   AI, or production behavior.
 - Gate 0 remains NOT_READY. Missing per-channel Required Inputs are tracked as
-  DQR-001. DQR-002 is fixed by a standard repository owned by the current
-  Windows user, with the intended Phase branch and user-provided remote active.
+  DQR-001. One complete record now exists for `@followgerry`; the remaining
+  gap is explicit confirmation that this is the complete initial inventory.
+  DQR-002 is fixed by a standard repository owned by the current Windows user,
+  with the intended Phase branch and user-provided remote active.
+
+Source verification snapshot
+----------------------------
+
+- `https://t.me/followgerry` returned HTTP 200 and public title
+  `Monster-貨幣宇宙中心` on 2026-09-03.
+- Binance USDⓈ-M `/fapi/v1/exchangeInfo` returned `CHIPUSDT` with
+  `status=TRADING`, `contractType=PERPETUAL`, `baseAsset=CHIP`, and
+  `quoteAsset=USDT` on 2026-09-03.
+- These checks establish a time-bound public identity/symbol snapshot only;
+  they do not validate Telegram MTProto completeness or future eligibility.
 
 Failure record
 --------------

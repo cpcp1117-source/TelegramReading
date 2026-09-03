@@ -8,7 +8,7 @@
 | Requirement | Acceptance Criteria | Component / Contract | Planned Test / Evidence | Blocking Gate |
 |---|---|---|---|---:|
 | FR-001 Phase governance | AC-001 | Phase Gate / startup capability | P0-T01/P0-T03; future capability-enforcement test | 0/each |
-| FR-002 Channel Policy | AC-002 | Channel Registry | Unknown/disabled/empty-symbol policy tests | 3 |
+| FR-002 Channel Policy | AC-002 | Channel Registry | Unknown/disabled channel；static/dynamic symbol scope；missing/ambiguous/ineligible/stale mapping tests | 3 |
 | FR-003 Telegram events | AC-003 | Collector | New/edit/reply/forward/caption/image source comparison | 2 |
 | FR-004 Telegram gap recovery | AC-003 | Collector checkpoint/difference adapter | Controlled disconnect/gap/recovery trace | 2 |
 | FR-005 Message versions/dedupe | AC-003 | Raw Message | Update+history duplicate, edit-version tests | 2 |

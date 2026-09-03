@@ -66,7 +66,7 @@
 - Numeric channel allowlist and status/authorization paths.
 - Text/caption/symbol alias deterministic normalization.
 - Media hash/type/size and low-confidence OCR manual review.
-- Unknown channel/symbol、stale、revoked authorization fail closed.
+- Unknown channel/symbol、ambiguous alias、ineligible or stale `exchangeInfo` fixture、revoked authorization fail closed.
 - Same fixture/config digest yields identical output.
 
 ### Gate 4 — Signal Lifecycle and Control Bot

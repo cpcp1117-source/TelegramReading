@@ -70,7 +70,9 @@ erDiagram
 | `display_name` | string | Yes | Non-authoritative human label |
 | `channel_type` | enum | Yes | `ANALYSIS` or `EXECUTION_SIGNAL` |
 | `status` | enum | Yes | `DRAFT/MONITOR_ONLY/ENABLED/PAUSED/RETIRED` |
-| `symbol_allowlist` | string[] | Yes | Empty means no symbol is permitted |
+| `symbol_scope_mode` | enum | Yes | `STATIC_ALLOWLIST` or `BINANCE_USDM_ACTIVE_PERPETUAL` |
+| `symbol_allowlist` | string[] | Conditional | Required and non-empty only for `STATIC_ALLOWLIST` |
+| `prohibited_symbols` | string[] | Yes | Explicit channel exclusions; empty allowed |
 | `content_types` | enum[] | Yes | `TEXT/CAPTION/IMAGE` in MVP |
 | `max_signal_age_sec` | integer | Yes | Default/global max 60 |
 | `max_receive_lag_sec` | integer | Yes | Default/global max 10 |
@@ -220,7 +222,7 @@ stateDiagram-v2
 ## 5. Data Invariants
 
 1. No application update/delete on `audit_event`; corrections are new events.
-2. No `ENABLED` Channel Policy without required authorization scopes and symbol allowlist.
+2. No `ENABLED` Channel Policy without required authorization scopes and a valid symbol scope. Dynamic scope requires a versioned symbol snapshot/fixture and unique eligible mapping; it is never an unrestricted free-text symbol.
 3. No `VALIDATED` signal without source evidence for symbol and side.
 4. No Candidate Trade approval without allowlisted actor, nonce, unexpired revision and current candidate state.
 5. No `RiskDecision.APPROVED` without fresh market/account/config snapshots.

@@ -5,12 +5,12 @@
 ## Current Status
 
 - Active phase: `Phase 0 — Requirements and Architecture`
-- Gate status: `NOT_READY`（缺少 Channel Onboarding Required Inputs）
+- Gate status: `NOT_READY`（`@followgerry` 已登錄；待確認 Phase 0 初始頻道清單是否完整）
 - Runtime code: 尚未建立
 - External credentials: 不需要，且不得加入工作區
 - Git branch: `phase/0-requirements-architecture`
 - Git remote: `https://github.com/cpcp1117-source/TelegramReading.git`
-- Next permitted action: 提供每個頻道的非機密 onboarding 資料與匿名化代表訊息，完成 Gate 0 re-review
+- Next permitted action: 確認 `@followgerry` 是否為初始唯一頻道；若不是，提供其餘頻道資料後完成 Gate 0 re-review
 
 ## Phase 0 Deliverables
 
@@ -18,6 +18,7 @@
 - [Architecture and Data Flow](docs/phase-0/architecture.md)
 - [Logical Data Model](docs/phase-0/logical-data-model.md)
 - [Channel Onboarding Template](docs/phase-0/channel-onboarding-template.md)
+- [Monster-貨幣宇宙中心 Onboarding Record](docs/phase-0/channels/monster-currency-universe.md)
 - [Credential Handoff Procedure](docs/phase-0/credential-handoff.md)
 - [Threat Model](docs/phase-0/threat-model.md)
 - [Test Strategy](docs/phase-0/test-strategy.md)

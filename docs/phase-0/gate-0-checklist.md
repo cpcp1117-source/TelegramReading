@@ -57,7 +57,7 @@ None in the Phase 0 document package.
 
 ### Major
 
-1. 缺少使用者原始 Phase 0 Required Inputs：實際 Source Channel 名稱/分類、預計 symbol allowlist、每頻道至少一則匿名化代表訊息，以及逐頻道 access/automation/AI authorization status。模板本身不能替代實際輸入。
+1. `@followgerry` 已完成 identity、`EXECUTION_SIGNAL`、dynamic symbol scope、代表 fixture 與四項 authorization 登錄；但尚未確認這是否為 Phase 0 初始完整 Source Channel 清單。若另有初始頻道，其 Required Inputs 仍缺少。
 
 ### Resolved Major Findings
 
@@ -69,15 +69,15 @@ None accepted. 除 TBD-001/TBD-002 外的 future-Gate TBDs 是已指派的後續
 
 ## 5. Required Input to Unblock Re-review
 
-For each channel, provide only:
+For each additional initial channel, provide only:
 
 1. Telegram display title or public `@username`（private invite link 不要提供）。
 2. `ANALYSIS` or `EXECUTION_SIGNAL`.
-3. Intended USDⓈ-M symbol allowlist.
+3. Intended USDⓈ-M symbol scope：固定清單，或像 `@followgerry` 一樣使用 exchange-validated dynamic scope.
 4. At least one anonymized representative message for Gate 0 scope confirmation（Gate 3 before implementation requires 20 fixtures/channel）。
 5. `ACCESS/AUTOMATION/AI_PROCESSING/MEDIA_STORAGE` status as `UNKNOWN/PENDING/GRANTED/REVOKED`; no evidence secret is needed now.
 
-After inputs are added to project-owned onboarding records, rerun document consistency, traceability and security checks. Only a clean re-review can change the verdict to `READY FOR USER ACCEPTANCE`.
+If `@followgerry` is the only initial channel, explicitly confirm that fact. Otherwise add the remaining project-owned onboarding records. Only a clean re-review can change the verdict to `READY FOR USER ACCEPTANCE`.
 
 ## 6. User Review Points
 

@@ -4,7 +4,7 @@
 
 - **Phase:** 0 — Requirements and Architecture
 - **Report Date:** 2026-09-03
-- **Specification Version:** v0.1
+- **Specification Version:** v0.2
 - **Workspace Initial State:** Empty folder; repository initialized during Phase 0
 - **Active Branch:** `phase/0-requirements-architecture`
 - **Remote:** `https://github.com/cpcp1117-source/TelegramReading.git`
@@ -22,6 +22,7 @@
 | Architecture and Data Flow | Complete |
 | Logical Data Model | Complete |
 | Channel Onboarding Template | Complete |
+| `@followgerry` Channel Onboarding Record | Complete for Gate 0 sample scope |
 | Credential Handoff Procedure | Complete |
 | Threat Model | Complete |
 | Test Strategy | Complete |
@@ -80,7 +81,7 @@ Exact validation commands and machine output are recorded in `validation-evidenc
 
 ### Unknowns / Future Blocking Inputs
 
-- Actual channel list、at least one Gate 0 representative sample per channel、symbol allowlists and per-channel authorization status. These are original Phase 0 Required Inputs and currently block Gate 0.
+- `@followgerry` identity/type、dynamic symbol scope、one representative sample and all four authorization statuses are recorded. Whether it is the complete Phase 0 initial channel list remains unknown; any additional initial channel still requires the same minimum record.
 - Exact Strategy Contracts.
 - Precise Position ROE stop formula and Binance Testnet semantics.
 - AI provider/model/data terms.
@@ -100,14 +101,14 @@ All are tracked as TBD-001–TBD-009 with blocking Gates in `system-spec.md`.
 | Severity | Count | Details |
 |---|---:|---|
 | Critical | 0 | None |
-| Major | 1 | Missing actual Phase 0 Channel Onboarding Required Inputs |
+| Major | 1 | Initial Source Channel inventory completeness is not confirmed |
 | Minor | 0 | None accepted |
 
 Tracked future TBDs are not classified as Phase 0 defects because each has an owner and blocks the relevant later Gate.
 
 ## 8. Gate Decision
 
-The Phase 0 document package is complete and the required Phase branch is active, but the Phase itself is not acceptance-ready because required per-channel onboarding inputs are missing. No Phase 1 implementation is authorized.
+The Phase 0 document package, required Phase branch, and first channel record are complete, but the Phase itself is not acceptance-ready until the user confirms whether `@followgerry` is the complete initial Source Channel inventory. No Phase 1 implementation is authorized.
 
 ```text
 Gate Verdict: NOT_READY
@@ -118,5 +119,5 @@ Next Phase: BLOCKED
 ## 9. Handoff
 
 - **Next Owner:** User / Acceptance Owner
-- **Required Action:** Provide the minimum non-secret per-channel inputs listed in `gate-0-checklist.md`, then request Gate 0 re-review.
+- **Required Action:** Confirm that `@followgerry` is the only initial Phase 0 channel, or provide the remaining channels using the minimum non-secret fields in `gate-0-checklist.md`.
 - **After Re-review and Acceptance Only:** Initialize/confirm Phase 1 branch and implement offline foundation.

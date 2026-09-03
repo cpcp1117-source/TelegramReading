@@ -3,11 +3,11 @@
 ## 1. Document Summary
 
 - **System / Feature Name:** Telegram Channel Trading Monitor
-- **Specification Version:** v0.1
-- **Date:** 2026-09-02
+- **Specification Version:** v0.2
+- **Date:** 2026-09-03
 - **Target Audience:** User / Acceptance Owner、Product/Technical Architect、Backend Engineer、QA、Security/Operations Reviewer
 - **Source Basis:** 使用者確認的 Sequential Development and Stage-Gate Plan、Phase 0 discovery、Telegram/Binance 官方文件
-- **Document Status:** Draft complete；Gate 0 `NOT_READY`，等待 Channel Onboarding Required Inputs
+- **Document Status:** Draft v0.2；Gate 0 `NOT_READY`，等待初始 Source Channel 清單完整性確認
 - **Implementation State:** Greenfield；沒有 runtime code、database、Docker 或 external credentials
 
 ### Revision History
@@ -15,6 +15,7 @@
 | Version | Date | Author / Owner | Change Summary | Status |
 |---|---|---|---|---|
 | v0.1 | 2026-09-02 | Codex / User | Phase 0 初版整合規格 | Ready for review |
+| v0.2 | 2026-09-03 | Codex / User | 登錄首個 Source Channel；將 symbol policy 明確化為 static 或 exchange-validated dynamic scope | Draft; Gate 0 re-review |
 
 ### Document Conventions
 
@@ -142,7 +143,7 @@
 | ID | Requirement | Priority | Observable Acceptance |
 |---|---|---|---|
 | FR-001 | 系統必須保存 Phase、Gate Verdict、test evidence 與 user acceptance；未 `USER_ACCEPTED` 禁止啟用下一 Phase capability。 | Must | Gate enforcement test 無法啟用 phase N+1 flag |
-| FR-002 | 系統必須以 Channel Policy 白名單控制每個 Source Channel 的 type、symbol、authorization、freshness 與 retention。 | Must | 未登錄 channel fail closed |
+| FR-002 | 系統必須以 Channel Policy 白名單控制每個 Source Channel 的 type、symbol scope、authorization、freshness 與 retention；dynamic scope 只允許來源證據可唯一對應 fresh/versioned `exchangeInfo` 中有效 USDⓈ-M perpetual 的 symbol。 | Must | 未登錄 channel 或無效/模糊 symbol fail closed |
 | FR-003 | Collector 必須支援 Telegram new message、edit、text、caption、reply/forward metadata 與圖片 reference。 | Must | Gate 2 source comparison 通過 |
 | FR-004 | Collector 必須保存 update state、偵測 gap，依 Telegram contract 進行 difference/message recovery。 | Must | Controlled gap/restart 無漏訊 |
 | FR-005 | Raw Message 必須以 channel/message/version 唯一化；edit 只能新增版本，不可覆寫歷史。 | Must | Replay/edit tests 無重複且歷史可見 |
@@ -321,7 +322,7 @@ Detailed controls and verification appear in [threat-model.md](threat-model.md) 
 | ID | Acceptance Item | Expected Result | Related Requirements |
 |---|---|---|---|
 | AC-001 | Gate enforcement | Phase N+1 capability cannot activate without `READY + USER_ACCEPTED` | FR-001 |
-| AC-002 | Channel allowlist | Unknown/disabled channel produces no downstream action | FR-002、FR-008 |
+| AC-002 | Channel/symbol allowlist | Unknown/disabled channel，或 missing/ambiguous/ineligible/stale symbol mapping produces no downstream action | FR-002、FR-008 |
 | AC-003 | Telegram completeness | New/edit/reply/media/history/restart evidence matches source | FR-003–FR-006 |
 | AC-004 | Deterministic normalization | Same fixtures generate identical normalized output | FR-007 |
 | AC-005 | Authorization gate | Unapproved access/automation/AI paths are blocked and audited | FR-008 |
@@ -373,8 +374,8 @@ Full requirement-to-test mapping is maintained in [acceptance-traceability.md](a
 
 | ID | Question | Impact | Owner | Blocking Gate |
 |---|---|---|---|---|
-| TBD-001 | Actual Source Channel list、type、symbol allowlist、至少一則匿名化代表訊息；Gate 3 前擴充至每頻道 20 fixtures | Phase 0 scope、parser and onboarding | User | Gate 0 / Gate 3 |
-| TBD-002 | Per-channel access/automation/AI processing authorization status；Gate 0 可明確填 `UNKNOWN/PENDING`，但不可留白 | Compliance enablement | User / Legal | Gate 0 status / Gate 3/5/8 enablement |
+| TBD-001 | 已登錄 `@followgerry`；仍需確認它是否為 Phase 0 初始完整 Source Channel 清單，若否則補充其餘 channel；Gate 3 前每頻道擴充至 20 fixtures | Phase 0 scope、parser and onboarding | User | Gate 0 / Gate 3 |
+| TBD-002 | `@followgerry` 四項 authorization 已由使用者宣告 `GRANTED`；其餘 channel 若納入初始範圍仍不得留白 | Compliance enablement | User / Legal | Gate 0 status / Gate 3/5/8 enablement |
 | TBD-003 | Exact Position ROE denominator、fees/funding/slippage buffer and stop conversion | Risk math | Technical + User | Gate 6 |
 | TBD-004 | `ANALYSIS` Strategy Contract rules per channel | Market confirmation | User + Product/Technical | Gate 5 |
 | TBD-005 | AI provider/model/schema version and data retention terms | AI adapter | User + Technical | Gate 5 |
@@ -383,7 +384,7 @@ Full requirement-to-test mapping is maintained in [acceptance-traceability.md](a
 | TBD-008 | Raw/audit/trade retention beyond Phase 7 and applicable legal obligations | Data lifecycle | User / Legal | Gate 8 |
 | TBD-009 | Owners for Technical、QA、Security、Ops、Legal roles | Handoff/accountability | User | Before affected Gate |
 
-TBD-001 與 TBD-002 是使用者原始 Phase 0 Required Inputs，目前阻擋 Gate 0。其餘 TBD 已指定在對應後續 Gate 前成為 blocking。
+TBD-001/TBD-002 對 `@followgerry` 已有完整 Gate 0 記錄；目前僅因初始 Source Channel 清單是否完整尚未確認而繼續阻擋 Gate 0。其餘 TBD 已指定在對應後續 Gate 前成為 blocking。
 
 ## 16. Traceability
 
@@ -392,12 +393,12 @@ All `FR-001`–`FR-025` and `NFR-001`–`NFR-014` are mapped in [acceptance-trac
 ## 17. Handoff Notes
 
 - **Deliverable:** Phase 0 integrated specification package
-- **Specification Version / Date:** v0.1 / 2026-09-02
+- **Specification Version / Date:** v0.2 / 2026-09-03
 - **Confirmed Decisions:** Sequential Gates；ANALYSIS manual approval；EXECUTION_SIGNAL automated only after Production Gate；Binance USDⓈ-M One-way Isolated 5x；3%/3 positions/-6% risk；default -30% position ROE stop；Control Bot；Docker VPS；separate credentials
 - **Assumptions:** <=20 channels、<=2,000 messages/day、PostgreSQL outbox sufficient
 - **In Scope:** Phase 0 documents only
 - **Out of Scope:** Runtime implementation and all credentials
-- **Open Questions:** TBD-001–TBD-009
+- **Open Questions:** TBD-001、TBD-003–TBD-009；TBD-002 對目前已登錄 channel 已填寫
 - **Risks / Dependencies:** Telegram content terms、signal ambiguity、aggressive risk、contract drift
 - **Next Owner:** User / Acceptance Owner
 - **Verification Required:** 先依 [Channel Onboarding Template](channel-onboarding-template.md) 提供每頻道最小非機密資料，再 re-review [Gate 0 Checklist](gate-0-checklist.md)；Gate 0 尚不可接受

@@ -37,7 +37,8 @@ Any `UNKNOWN/PENDING/REVOKED` scope must remain disabled for that processing pat
 
 | Field | Value |
 |---|---|
-| Allowed USDⓈ-M symbols |  |
+| Symbol scope mode | `STATIC_ALLOWLIST` / `BINANCE_USDM_ACTIVE_PERPETUAL` |
+| Static allowed USDⓈ-M symbols | Required only for `STATIC_ALLOWLIST` |
 | Explicitly prohibited symbols |  |
 | Message languages | Traditional Chinese / Simplified Chinese / English / Other |
 | Supported content | Text / Caption / Image |
@@ -58,6 +59,8 @@ Any `UNKNOWN/PENDING/REVOKED` scope must remain disabled for that processing pat
 - Does author post leverage? If yes, system still fixes 5x.
 - Missing SL behavior: `DEFAULT_ROE_30`.
 - Missing TP behavior: no synthesized TP.
+
+For `BINANCE_USDM_ACTIVE_PERPETUAL`, source aliases must map uniquely against a versioned `exchangeInfo` fixture/snapshot to `quoteAsset=USDT`, `contractType=PERPETUAL`, `status=TRADING`. Missing, ambiguous, stale or ineligible mappings fail closed. Content language must never determine quantity or risk budget.
 
 ### ANALYSIS Behavior
 
@@ -101,7 +104,7 @@ Minimum 20 samples per channel before Gate 3. Use synthetic/anonymized content u
 |---|---|
 | Identity resolved by numeric channel ID | Pass / Fail |
 | Required authorization scopes granted | Pass / Fail |
-| Symbol allowlist non-empty | Pass / Fail |
+| Valid symbol scope configured | Pass / Fail |
 | 20 fixtures reviewed | Pass / Fail |
 | Critical parser false positive = 0 | Pass / Fail |
 | Retention configured | Pass / Fail |
