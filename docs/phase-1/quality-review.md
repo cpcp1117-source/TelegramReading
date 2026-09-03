@@ -3,10 +3,10 @@
 ## Review Target
 
 - **Target:** Phase 1 Offline Foundation implementation and acceptance package
-- **Revision / Fixed Point:** `cc30b237159bf18d296100db2b4eafaeabc6431d`
+- **Revision / Fixed Point:** `6cd85b85e12be5810e6db34b862e24ba2df106f2`
 - **Comparison Point:** accepted tag `phase-0-accepted` at `4128cbb`
 - **Authoritative Sources:** accepted Stage-Gate plan、Phase 0 System Specification、Architecture、Logical Data Model、Threat Model、Test Strategy
-- **Environment and Evidence Available:** source/migrations/tests plus GitHub Actions run 33722971950 on clean Linux runners; local Windows static/unit evidence
+- **Environment and Evidence Available:** source/migrations/tests plus GitHub Actions run 33769849673 on clean Linux runners; local Windows Docker, static, unit and isolated PostgreSQL evidence
 
 ## Executive Verdict
 
@@ -14,7 +14,7 @@
 - **Critical:** 0
 - **Major:** 0
 - **Minor:** 0
-- **Verification Limits:** workstation Docker Desktop daemon unavailable; clean GitHub runner executed the complete database/container seam. No Telegram/provider/Production behavior is in scope or claimed.
+- **Verification Limits:** No Telegram/provider/Production behavior is in scope or claimed. Phase 1 evidence covers only the offline foundation.
 
 ## Findings
 
@@ -41,7 +41,7 @@ No unresolved findings.
 
 ## Validation Evidence and Operational Risk
 
-- 32 tests pass twice in CI (quality and container seam), exact coverage 96.65%.
+- 37 tests pass twice in CI (quality and container seam), exact coverage 95.37%.
 - Real PostgreSQL 16.6 validates rollback/re-upgrade, constraints, immutability, transactional rollback and recovery.
 - Clean Docker runner validates start, health, replay, restart, stable image identity and cleanup.
 - Trivy reports zero HIGH/CRITICAL findings and pip-audit reports no known runtime dependency vulnerabilities.
@@ -57,6 +57,8 @@ No unresolved findings.
 | Missing image identity evidence | Fixed | image ID captured and equality asserted after restart | None |
 | DB trust auth and unmasked ephemeral value | Fixed | generated masked Compose credential; final logs `***` | None |
 | Stale README phase status | Fixed | README identifies active Phase 1 and pending Gate | None |
+| Special-character database password misparsed as URL structure | Fixed | component-based config, `SecretStr`, `URL.create`, local PostgreSQL and CI Compose with URL delimiters | None |
+| Local Docker Desktop unavailable | Fixed | App/DB healthy and HTTP readiness `ready / available` on Windows | None |
 
 ## Required Handoff
 

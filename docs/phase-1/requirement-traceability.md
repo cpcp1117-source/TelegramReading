@@ -1,7 +1,7 @@
 # Phase 1 Requirement Traceability
 
 - **Source:** accepted Phase 0 Test Strategy、Architecture、Logical Data Model and user Stage-Gate plan
-- **Fixed Point:** `cc30b237159bf18d296100db2b4eafaeabc6431d`
+- **Fixed Point:** `6cd85b85e12be5810e6db34b862e24ba2df106f2`
 
 | ID | Requirement | Implementation | Verification | Status |
 |---|---|---|---|---|
@@ -22,8 +22,9 @@
 | P1-REQ-015 | No external egress required | App operates on internal network after edge disconnect | no-egress Compose step | PASS |
 | P1-REQ-016 | Secrets absent and credentials protected | `.gitignore`、scanner、masked ephemeral DB password | repo scan 0; logs show `***` | PASS |
 | P1-REQ-017 | Dependency and image vulnerabilities checked | pip-audit、Trivy | no known dependencies; 0 HIGH/CRITICAL image findings | PASS |
-| P1-REQ-018 | Overall coverage >=85% | pytest-cov config | 96.65% | PASS |
+| P1-REQ-018 | Overall coverage >=85% | pytest-cov config | 95.37% | PASS |
 | P1-REQ-019 | Phase 2+ capabilities prohibited | no provider SDK/client; offline config | dependency/source inventory and config tests | PASS |
+| P1-REQ-020 | Database credentials support URL special characters and reject blank values | component fields, `SecretStr`, SQLAlchemy `URL.create` | unit test, local isolated PostgreSQL, Compose CI | PASS |
 
 ## Acceptance Criteria
 
@@ -39,3 +40,5 @@
 | P1-AC-008 | Given repository/runtime artifacts, when security scans run, then secret findings and HIGH/CRITICAL runtime findings are zero | scanner、pip-audit、Trivy | PASS |
 | P1-AC-009 | Given App edge is disconnected, when internal health and data flow run, then no external egress is required | no-egress and subsequent Compose steps | PASS |
 | P1-AC-010 | Given Phase 1 startup/config, when an external/future capability is configured, then it is absent or rejected | config/dependency tests | PASS |
+| P1-AC-011 | Given a password containing URL delimiters, when App and migrations connect, then the raw password is preserved without changing URL structure | special-character CI Compose credential and 37-test database suite | PASS |
+| P1-AC-012 | Given an empty database password, when Compose is rendered, then startup fails closed | blank credential CI step | PASS |
