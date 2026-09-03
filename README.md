@@ -6,7 +6,7 @@
 
 - Completed phase: `Phase 0 — Requirements and Architecture`
 - Active phase: `Phase 1 — Offline Foundation`
-- Gate status: `Phase 0 READY + USER_ACCEPTED`; `Gate 1 verification in progress`
+- Gate status: `Phase 0 READY + USER_ACCEPTED`; `Gate 1 READY + USER_ACCEPTANCE_PENDING`
 - Runtime code: Phase 1 offline-only skeleton exists
 - External credentials: 不需要，且不得加入工作區
 - Git branch: `phase/1-offline-foundation`
@@ -79,3 +79,13 @@ docker compose --profile test run --rm test pytest --cov --cov-report=term-missi
 ```
 
 Gate 1 remains unaccepted until all required evidence is recorded, the review verdict is `READY`, and the user explicitly accepts it.
+
+### Gate 1 Acceptance Package
+
+- [Phase Report](docs/phase-1/phase-report.md)
+- [Test Evidence](docs/phase-1/test-evidence.md)
+- [Requirement Traceability](docs/phase-1/requirement-traceability.md)
+- [Security Check](docs/phase-1/security-check.md)
+- [Known Issues](docs/phase-1/known-issues.md)
+- [Delivery Quality Review](docs/phase-1/quality-review.md)
+- [Gate 1 Checklist](docs/phase-1/gate-1-checklist.md)
