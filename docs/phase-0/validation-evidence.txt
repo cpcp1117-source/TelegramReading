@@ -54,11 +54,10 @@ Interpretation
 - No runtime tests exist because runtime code is explicitly prohibited in
   Phase 0. This evidence does not prove Telegram, Binance, database, container,
   AI, or production behavior.
-- Gate 0 remains NOT_READY. Missing per-channel Required Inputs are tracked as
-  DQR-001. One complete record now exists for `@followgerry`; the remaining
-  gap is explicit confirmation that this is the complete initial inventory.
-  DQR-002 is fixed by a standard repository owned by the current Windows user,
-  with the intended Phase branch and user-provided remote active.
+- Gate 0 is READY for user acceptance. DQR-001 is fixed by the complete
+  `@followgerry` onboarding record and the user's confirmation that it is the
+  sole Phase 0 initial channel. DQR-002 is fixed by a standard repository owned
+  by the current Windows user, with the intended Phase branch and remote active.
 
 Source verification snapshot
 ----------------------------
@@ -89,8 +88,8 @@ Gate result
 -----------
 
 Critical=0
-Major=1
+Major=0
 Minor=0
-GATE_VERDICT=NOT_READY
-USER_ACCEPTANCE=BLOCKED
+GATE_VERDICT=READY
+USER_ACCEPTANCE=PENDING
 PHASE_1_AUTHORIZED=False

@@ -1,8 +1,8 @@
 # Gate 0 Checklist
 
 - **Gate:** Phase 0 — Requirements and Architecture
-- **Current Verdict:** `NOT_READY`
-- **User Acceptance:** `BLOCKED`
+- **Current Verdict:** `READY`
+- **User Acceptance:** `PENDING`
 - **Next Phase Permission:** `DENIED` until explicit user acceptance
 
 ## 1. Deliverables
@@ -35,7 +35,7 @@
 | Fixed risk decisions represented consistently | PASS | 5x、3%、3 positions、-6%、-30% ROE、10%/30% margin |
 | Errors/recovery covered | PASS | Gap、stale、timeout、protection、DB/audit |
 | External contracts identified | PASS | Telegram/Binance official docs and spikes |
-| Open decisions have owner/blocking Gate | PASS | TBD-001–TBD-009 |
+| Open decisions have owner/blocking Gate | PASS | TBD-001/TBD-002 resolved for Phase 0；TBD-003–TBD-009 block their assigned future Gates |
 
 ## 3. Traceability and Security
 
@@ -57,19 +57,20 @@ None in the Phase 0 document package.
 
 ### Major
 
-1. `@followgerry` 已完成 identity、`EXECUTION_SIGNAL`、dynamic symbol scope、代表 fixture 與四項 authorization 登錄；但尚未確認這是否為 Phase 0 初始完整 Source Channel 清單。若另有初始頻道，其 Required Inputs 仍缺少。
+None.
 
 ### Resolved Major Findings
 
 - DQR-002：已由目前 Windows 使用者建立標準 `.git`，啟用 `phase/0-requirements-architecture`，並連接使用者指定的 GitHub remote。原 sandbox metadata 保留於 `.git-sandbox-init-backup`，不納入 staging 或 push。
+- DQR-001：使用者已確認 `@followgerry` 是 Phase 0 初始唯一頻道；identity、type、dynamic symbol scope、fixture 與 authorization record 完整。
 
 ### Minor
 
-None accepted. 除 TBD-001/TBD-002 外的 future-Gate TBDs 是已指派的後續 requirements/dependencies。
+None. Future-Gate TBDs 是已指派的後續 requirements/dependencies，不構成 Gate 0 defect。
 
-## 5. Required Input to Unblock Re-review
+## 5. Resolved Required Input
 
-For each additional initial channel, provide only:
+The Phase 0 initial inventory is exactly one channel: `@followgerry`. Its required fields are recorded. Future channels must independently provide:
 
 1. Telegram display title or public `@username`（private invite link 不要提供）。
 2. `ANALYSIS` or `EXECUTION_SIGNAL`.
@@ -77,7 +78,7 @@ For each additional initial channel, provide only:
 4. At least one anonymized representative message for Gate 0 scope confirmation（Gate 3 before implementation requires 20 fixtures/channel）。
 5. `ACCESS/AUTOMATION/AI_PROCESSING/MEDIA_STORAGE` status as `UNKNOWN/PENDING/GRANTED/REVOKED`; no evidence secret is needed now.
 
-If `@followgerry` is the only initial channel, explicitly confirm that fact. Otherwise add the remaining project-owned onboarding records. Only a clean re-review can change the verdict to `READY FOR USER ACCEPTANCE`.
+The re-review is clean and the verdict is `READY FOR USER ACCEPTANCE`. This does not authorize Phase 1 until the acceptance record is explicitly completed by the user.
 
 ## 6. User Review Points
 
@@ -103,4 +104,4 @@ To be completed only after explicit user response:
 | Accepted Specification Version |  |
 | Conditions / Revisions Required |  |
 
-An implementation request does not itself count as acceptance of this newly produced Phase 0 package. Gate 0 cannot be accepted while its verdict is `NOT_READY`.
+The earlier implementation request and scope clarification do not themselves count as acceptance of Specification v0.2. Gate 0 is ready, but remains unaccepted until the user explicitly approves it.

@@ -9,6 +9,7 @@
 - **Planned Phase 2 Status:** `MONITOR_ONLY`
 - **Source of User Decisions:** User-provided onboarding response on 2026-09-03
 - **Runtime Enablement:** Not available in Phase 0
+- **Phase 0 Initial Scope:** Sole Source Channel, confirmed by user on 2026-09-03
 
 ## 2. Channel Identity
 
@@ -86,6 +87,7 @@ On 2026-09-03, the public Binance USDⓈ-M `exchangeInfo` response listed `CHIPU
 | Authorization statuses recorded | PASS | All four user-declared `GRANTED` |
 | Symbol scope explicit | PASS | Dynamic, exchange-validated, fail-closed |
 | Gate 0 representative sample | PASS | One anonymized fixture |
+| Initial inventory scope | PASS | User confirmed this is the sole Phase 0 channel |
 | Gate 3 fixture set | NOT STARTED | Requires at least 20 fixtures before Gate 3 |
 | Runtime/parser behavior | NOT TESTED | Prohibited in Phase 0 |
 
