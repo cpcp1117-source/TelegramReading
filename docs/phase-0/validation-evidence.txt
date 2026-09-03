@@ -1,0 +1,83 @@
+Phase 0 Validation Evidence
+===========================
+
+Execution date: 2026-09-03
+Workspace: G:\Telegram自動化
+PowerShell: 7.6.4
+Git: 2.52.0.windows.1
+OS runtime: Microsoft Windows NT 10.0.26200.0 X64
+
+Validation scope
+----------------
+
+1. Enumerate the Phase 0 required-file manifest.
+2. Resolve every relative Markdown link against its source document.
+3. Extract unique FR/NFR/BR/AC IDs and verify each appears in the
+   Acceptance Traceability Matrix.
+4. Check Markdown code fences for balanced delimiters.
+5. Scan documentation for credential-like assignments with non-placeholder
+   values.
+6. Search the workspace for runtime/source/config extensions that would
+   violate the Phase 0 documentation-only boundary.
+7. Inspect the standard Git directory and the recoverable backup metadata.
+
+Machine result
+--------------
+
+MARKDOWN_FILES=17
+REQUIRED_ARTIFACTS=18
+MISSING_ARTIFACTS=0
+BROKEN_LOCAL_LINKS=0
+FR_UNIQUE=25
+FR_UNMAPPED=0
+NFR_UNIQUE=14
+NFR_UNMAPPED=0
+BR_UNIQUE=15
+BR_UNMAPPED=0
+AC_UNIQUE=17
+AC_UNMAPPED=0
+TBD_UNIQUE=9
+UNBALANCED_CODE_FENCES=0
+SECRET_PATTERN_FINDINGS=0
+RUNTIME_FILES=0
+STANDARD_GIT_DIR=True
+BACKUP_GIT_DIR=True
+BACKUP_HEAD=ref: refs/heads/phase/0-requirements-architecture
+ACTIVE_BRANCH=phase/0-requirements-architecture
+REMOTE_ORIGIN=https://github.com/cpcp1117-source/TelegramReading.git
+
+Interpretation
+--------------
+
+- Structural, traceability, documentation-secret, and phase-boundary checks
+  passed.
+- No runtime tests exist because runtime code is explicitly prohibited in
+  Phase 0. This evidence does not prove Telegram, Binance, database, container,
+  AI, or production behavior.
+- Gate 0 remains NOT_READY. Missing per-channel Required Inputs are tracked as
+  DQR-001. DQR-002 is fixed by a standard repository owned by the current
+  Windows user, with the intended Phase branch and user-provided remote active.
+
+Failure record
+--------------
+
+- A sandboxed `git init` created metadata owned by the sandbox SID. Windows Git
+  rejected the repository as dubious ownership, and workspace refresh failed.
+  The uncommitted metadata was moved intact to
+  `.git-sandbox-init-backup`; it was not deleted. A new standard repository was
+  initialized successfully under the current Windows user. The backup remains
+  unstaged and excluded from the Phase 0 push scope.
+- `Get-CimInstance Win32_OperatingSystem` returned Access Denied while collecting
+  optional environment metadata. The environment version was instead obtained
+  read-only from `[System.Environment]::OSVersion`; this does not affect the
+  validation results above.
+
+Gate result
+-----------
+
+Critical=0
+Major=1
+Minor=0
+GATE_VERDICT=NOT_READY
+USER_ACCEPTANCE=BLOCKED
+PHASE_1_AUTHORIZED=False
