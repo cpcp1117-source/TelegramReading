@@ -20,7 +20,7 @@ jobs:
         env:
           POSTGRES_DB: telegram_trader
           POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}
+          POSTGRES_PASSWORD: change_me
         ports:
           - 5432:5432
         options: >-
@@ -30,8 +30,8 @@ jobs:
           --health-retries 20
     env:
       APP_ENVIRONMENT: offline
-      APP_DATABASE_URL: postgresql+psycopg://postgres:${{ github.run_id }}-${{ github.run_attempt }}@localhost:5432/telegram_trader
-      TEST_DATABASE_URL: postgresql+psycopg://postgres:${{ github.run_id }}-${{ github.run_attempt }}@localhost:5432/telegram_trader
+      APP_DATABASE_URL: postgresql+psycopg://postgres:change_me@localhost:5432/telegram_trader
+      TEST_DATABASE_URL: postgresql+psycopg://postgres:change_me@localhost:5432/telegram_trader
     steps:
       - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v6
@@ -40,7 +40,7 @@ jobs:
           enable-cache: true
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11.15"
+          python-version: "3.11.16"
       - run: uv sync --dev --locked --no-editable
       - run: uv run ruff check .
       - run: uv run ruff format --check .
@@ -54,10 +54,14 @@ jobs:
 
   compose:
     runs-on: ubuntu-latest
-    env:
-      POSTGRES_PASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v5
+      - name: Generate masked ephemeral database credential
+        shell: bash
+        run: |
+          DB_VALUE=$(openssl rand -hex 32)
+          echo "::add-mask::$DB_VALUE"
+          printf '%s=%s\n' 'POSTGRES_PASSWORD' "$DB_VALUE" >> "$GITHUB_ENV"
       - name: Validate Compose model
         run: docker compose config --quiet
       - name: Clean build and startup

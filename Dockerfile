@@ -1,4 +1,4 @@
-FROM python:3.11.15-slim AS base
+FROM python:3.11.16-slim-trixie AS base
 
 COPY --from=ghcr.io/astral-sh/uv:0.11.25 /uv /uvx /bin/
 
@@ -16,7 +16,7 @@ COPY fixtures ./fixtures
 FROM base AS runtime-builder
 RUN uv sync --locked --no-dev --no-editable
 
-FROM python:3.11.15-slim AS runtime
+FROM python:3.11.16-slim-trixie AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/app/.venv/bin:${PATH}"
