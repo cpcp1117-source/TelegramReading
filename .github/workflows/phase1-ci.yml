@@ -42,6 +42,12 @@ jobs:
         with:
           python-version: "3.11.16"
       - run: uv sync --dev --locked --no-editable
+      - name: Report quality tool versions
+        run: |
+          python --version
+          uv --version
+          uv run ruff --version
+          uv run mypy --version
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run mypy
@@ -62,6 +68,10 @@ jobs:
           DB_VALUE=$(openssl rand -hex 32)
           echo "::add-mask::$DB_VALUE"
           printf '%s=%s\n' 'POSTGRES_PASSWORD' "$DB_VALUE" >> "$GITHUB_ENV"
+      - name: Report container tool versions
+        run: |
+          docker version --format 'Docker Engine {{.Server.Version}}'
+          docker compose version
       - name: Validate Compose model
         run: docker compose config --quiet
       - name: Clean build and startup
