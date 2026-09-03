@@ -25,7 +25,8 @@ COPY --from=runtime-builder /app/.venv /app/.venv
 COPY --from=runtime-builder /app/alembic.ini ./alembic.ini
 COPY --from=runtime-builder /app/alembic ./alembic
 COPY --from=runtime-builder /app/fixtures ./fixtures
-RUN addgroup --system app && \
+RUN python -m pip uninstall --yes setuptools wheel && \
+    addgroup --system app && \
     adduser --system --ingroup app app
 USER app
 EXPOSE 8080
