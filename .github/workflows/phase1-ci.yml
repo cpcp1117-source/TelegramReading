@@ -30,8 +30,11 @@ jobs:
           --health-retries 20
     env:
       APP_ENVIRONMENT: offline
-      APP_DATABASE_URL: postgresql+psycopg://postgres:change_me@localhost:5432/telegram_trader
-      TEST_DATABASE_URL: postgresql+psycopg://postgres:change_me@localhost:5432/telegram_trader
+      APP_DATABASE_HOST: localhost
+      APP_DATABASE_PORT: 5432
+      APP_DATABASE_NAME: telegram_trader
+      APP_DATABASE_USER: postgres
+      APP_DATABASE_PASSWORD: change_me
     steps:
       - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v6
@@ -65,13 +68,22 @@ jobs:
       - name: Generate masked ephemeral database credential
         shell: bash
         run: |
-          DB_VALUE=$(openssl rand -hex 32)
+          DB_VALUE="$(openssl rand -hex 24)@:/#%?[]!+"
           echo "::add-mask::$DB_VALUE"
           printf '%s=%s\n' 'POSTGRES_PASSWORD' "$DB_VALUE" >> "$GITHUB_ENV"
       - name: Report container tool versions
         run: |
           docker version --format 'Docker Engine {{.Server.Version}}'
           docker compose version
+      - name: Verify blank database credential fails closed
+        env:
+          POSTGRES_PASSWORD: ""
+        run: |
+          if docker compose config --quiet 2> blank-credential.log; then
+            echo "Compose unexpectedly accepted a blank database credential"
+            exit 1
+          fi
+          grep 'POSTGRES_PASSWORD is required' blank-credential.log
       - name: Validate Compose model
         run: docker compose config --quiet
       - name: Clean build and startup

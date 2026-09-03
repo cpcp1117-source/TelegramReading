@@ -34,9 +34,8 @@ pytestmark = pytest.mark.integration
 @pytest.fixture
 def engine() -> Iterator[Engine]:
     database_url = os.environ.get("TEST_DATABASE_URL")
-    if not database_url:
-        pytest.fail("TEST_DATABASE_URL is required for integration tests")
-    active_engine = create_db_engine(Settings(database_url=database_url))
+    integration_settings = Settings(database_url=database_url) if database_url else Settings()
+    active_engine = create_db_engine(integration_settings)
     with active_engine.begin() as connection:
         connection.execute(
             text(
@@ -192,8 +191,6 @@ def test_audit_event_cannot_be_updated_or_deleted(engine: Engine) -> None:
 
 
 def test_cli_emit_and_inspect(engine: Engine, monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
-    database_url = os.environ["TEST_DATABASE_URL"]
-    monkeypatch.setenv("APP_DATABASE_URL", database_url)
     get_settings.cache_clear()
     consumer = f"cli-{uuid.uuid4()}"
     monkeypatch.setattr(
@@ -225,8 +222,6 @@ def test_cli_emit_and_inspect(engine: Engine, monkeypatch, capsys) -> None:  # t
 
 
 def test_cli_simulates_fixture(engine: Engine, monkeypatch, capsys, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
-    database_url = os.environ["TEST_DATABASE_URL"]
-    monkeypatch.setenv("APP_DATABASE_URL", database_url)
     get_settings.cache_clear()
     consumer = f"fixture-{uuid.uuid4()}"
     fixture = tmp_path / "fixture.json"

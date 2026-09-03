@@ -62,14 +62,16 @@ No Telegram、Binance or OpenAI SDK/client exists in this phase.
 ### Docker Compose
 
 ```powershell
-$dbCredential = [Guid]::NewGuid().ToString("N")
+$dbCredential = ([Guid]::NewGuid().ToString("N")) + "@:/#%?[]!+"
 Set-Item -Path Env:POSTGRES_PASSWORD -Value $dbCredential
 docker compose up --build -d
 docker compose ps
 Invoke-RestMethod http://127.0.0.1:8080/health/ready
 ```
 
-`POSTGRES_PASSWORD` 只存在目前 terminal process；不得寫入 repository 或測試報告。
+`POSTGRES_PASSWORD` 只存在目前 terminal process；不得寫入 repository 或測試報告。App 以分欄設定建立 SQLAlchemy URL，密碼可包含 URL 特殊字元。
+
+PostgreSQL 只會在第一次建立 volume 時套用 `POSTGRES_PASSWORD`。若既有 volume 需要改密碼，必須在資料庫內輪替；只修改環境變數會造成驗證失敗。僅在確認本機測試資料可刪除時，才可使用 `docker compose down --volumes`重建。
 
 ### PostgreSQL Integration Tests
 

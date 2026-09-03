@@ -8,7 +8,7 @@ from telegram_trader.config import Settings, get_settings
 
 def create_db_engine(settings: Settings | None = None) -> Engine:
     active_settings = settings or get_settings()
-    return create_engine(active_settings.database_url, pool_pre_ping=True)
+    return create_engine(active_settings.sqlalchemy_database_url, pool_pre_ping=True)
 
 
 def create_session_factory(engine: Engine) -> sessionmaker[Session]:
