@@ -41,6 +41,7 @@ services:
       - "127.0.0.1:8080:8080"
     networks:
       - internal
+      - edge
     read_only: true
     tmpfs:
       - /tmp
@@ -71,3 +72,4 @@ volumes:
 networks:
   internal:
     internal: true
+  edge:

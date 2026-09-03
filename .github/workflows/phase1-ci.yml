@@ -33,7 +33,7 @@ jobs:
       APP_DATABASE_URL: postgresql+psycopg://postgres@localhost:5432/telegram_trader
       TEST_DATABASE_URL: postgresql+psycopg://postgres@localhost:5432/telegram_trader
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v6
         with:
           version: "0.11.25"
@@ -54,7 +54,7 @@ jobs:
   compose:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Validate Compose model
         run: docker compose config --quiet
       - name: Clean build and startup
