@@ -6,8 +6,8 @@
 - **Implementation Fixed Point:** `6cd85b85e12be5810e6db34b862e24ba2df106f2`
 - **Branch:** `phase/1-offline-foundation`
 - **Gate Verdict:** `READY`
-- **User Acceptance:** `PENDING`
-- **Next Phase Permission:** `NOT GRANTED`
+- **User Acceptance:** `ACCEPTED 2026-09-06`
+- **Next Phase Permission:** `GRANTED 2026-09-06`
 
 ## 1. Outcome
 
@@ -73,9 +73,9 @@ Detailed commands and failure history are in [test-evidence.md](test-evidence.md
 - Product Critical: 0.
 - Product Major: 0.
 - Product Minor: 0.
-- User acceptance is pending.
+- User acceptance was explicitly recorded on 2026-09-06.
 - The workstation Docker Desktop issue is resolved. Local App and PostgreSQL both reached `healthy`; HTTP readiness returned `ready / available`.
 
 ## 7. Gate Decision
 
-`READY` for user review. Phase 2 remains prohibited until the user explicitly accepts Gate 1. No `phase-1-accepted` tag has been or may be created before that acceptance.
+`READY + USER_ACCEPTED`. The user authorized the `phase-1-accepted` tag and a separate Phase 2 branch on 2026-09-06. Telegram credentials remain subject to the Phase 2 credential handoff procedure and must not be committed or pasted into chat.

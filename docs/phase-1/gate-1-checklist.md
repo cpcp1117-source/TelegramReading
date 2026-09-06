@@ -4,8 +4,8 @@
 - **Fixed Point:** `6cd85b85e12be5810e6db34b862e24ba2df106f2`
 - **Evidence Run:** [33769849673](https://github.com/cpcp1117-source/TelegramReading/actions/runs/33769849673)
 - **Gate Verdict:** `READY`
-- **User Acceptance:** `PENDING`
-- **Phase 2 Authorization:** `DENIED UNTIL EXPLICIT ACCEPTANCE`
+- **User Acceptance:** `ACCEPTED 2026-09-06`
+- **Phase 2 Authorization:** `GRANTED 2026-09-06`
 
 | Gate Condition | Result | Evidence |
 |---|---|---|
@@ -34,4 +34,6 @@
 
 ## User Acceptance Record
 
-Pending. A valid acceptance must explicitly approve Gate 1 / Phase 1 and authorize the `phase-1-accepted` tag and Phase 2. Until then, the branch must remain in Phase 1 and no Telegram credential may be introduced.
+Accepted by the user on 2026-09-06 with the explicit statement: 「我驗收並批准 Phase 1 Gate 1，允許建立 `phase-1-accepted` tag，並開始 Phase 2。」
+
+This acceptance authorizes merging Phase 1, creating the annotated tag, and starting a separate Phase 2 branch. It does not introduce or disclose any Telegram credential by itself.

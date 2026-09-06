@@ -4,15 +4,15 @@
 
 ## Current Status
 
-- Completed phase: `Phase 0 — Requirements and Architecture`
-- Active phase: `Phase 1 — Offline Foundation`
-- Gate status: `Phase 0 READY + USER_ACCEPTED`; `Gate 1 READY + USER_ACCEPTANCE_PENDING`
+- Completed phases: `Phase 0 — Requirements and Architecture`; `Phase 1 — Offline Foundation`
+- Active phase: `Phase 2 — Telegram Read-only Collector` (authorized; branch creation pending)
+- Gate status: `Phase 0 READY + USER_ACCEPTED`; `Phase 1 READY + USER_ACCEPTED`
 - Runtime code: Phase 1 offline-only skeleton exists
 - External credentials: 不需要，且不得加入工作區
 - Git branch: `phase/1-offline-foundation`
 - Git remote: `https://github.com/cpcp1117-source/TelegramReading.git`
 - Initial channel scope: only `@followgerry`; future channels require separate onboarding after the current system is stable
-- Next permitted action: complete Gate 1 evidence and obtain explicit user acceptance
+- Next permitted action: merge Phase 1, create `phase-1-accepted`, then create the Phase 2 branch
 
 ## Phase 0 Deliverables
 

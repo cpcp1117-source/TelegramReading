@@ -29,7 +29,7 @@ No unresolved findings.
 - All Phase 1 deliverables and the accepted Gate 1 Test Strategy areas are mapped in `requirement-traceability.md`.
 - Transactional outbox, crash consistency, deterministic edit/reply/duplicate fixtures, append-only enforcement, no-egress operation, image identity and security scans are present.
 - Phase 2+ capability boundaries are preserved; no external provider client or credential was introduced.
-- User acceptance remains pending and Phase 2 permission remains denied.
+- User acceptance was recorded on 2026-09-06; Phase 2 branch creation is authorized.
 
 ## Engineering Standards
 
@@ -56,7 +56,7 @@ No unresolved findings.
 | Missing dependency/image/no-egress security evidence | Fixed | pip-audit, Trivy, disconnected-edge Compose test | None |
 | Missing image identity evidence | Fixed | image ID captured and equality asserted after restart | None |
 | DB trust auth and unmasked ephemeral value | Fixed | generated masked Compose credential; final logs `***` | None |
-| Stale README phase status | Fixed | README identifies active Phase 1 and pending Gate | None |
+| Stale README phase status | Fixed | README records Phase 1 acceptance and the authorized transition | None |
 | Special-character database password misparsed as URL structure | Fixed | component-based config, `SecretStr`, `URL.create`, local PostgreSQL and CI Compose with URL delimiters | None |
 | Local Docker Desktop unavailable | Fixed | App/DB healthy and HTTP readiness `ready / available` on Windows | None |
 
@@ -65,6 +65,6 @@ No unresolved findings.
 - **Next Owner:** Human acceptance owner
 - **Required Fixes:** None before acceptance
 - **Evidence Required for Re-review:** Already satisfied at fixed point
-- **Human Acceptance Decision:** `PENDING`
+- **Human Acceptance Decision:** `ACCEPTED 2026-09-06`
 
 If accepted, the next authorized operation is to record acceptance, merge according to the Stage-Gate workflow, create `phase-1-accepted`, and only then begin a separate Phase 2 branch. Until then, those operations are prohibited.
