@@ -1,0 +1,32 @@
+[
+  {
+    "channel_id": "mock-channel-001",
+    "message_id": 1001,
+    "edit_version": 0,
+    "sequence": 1,
+    "text": "Synthetic market observation A"
+  },
+  {
+    "channel_id": "mock-channel-001",
+    "message_id": 1001,
+    "edit_version": 1,
+    "sequence": 2,
+    "text": "Synthetic market observation A (edited)"
+  },
+  {
+    "channel_id": "mock-channel-001",
+    "message_id": 1002,
+    "edit_version": 0,
+    "sequence": 3,
+    "text": "Synthetic reply to observation A",
+    "reply_to_message_id": 1001
+  },
+  {
+    "channel_id": "mock-channel-001",
+    "message_id": 1002,
+    "edit_version": 0,
+    "sequence": 3,
+    "text": "Synthetic reply to observation A",
+    "reply_to_message_id": 1001
+  }
+]
