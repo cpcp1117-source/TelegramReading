@@ -8,7 +8,9 @@ import pytest
 from pydantic import SecretStr
 
 from telegram_trader.config import Settings
+from telegram_trader.telegram_cli import dialog_listing_result
 from telegram_trader.telegram_readonly import (
+    ChannelDialogSummary,
     TelegramDialog,
     account_summary,
     create_client,
@@ -121,3 +123,23 @@ async def test_channel_dialog_listing_filters_and_prioritizes_target() -> None:
     assert [dialog.channel_id for dialog in dialogs] == [10, 30]
     assert dialogs[0].is_target is True
     assert dialogs[1].is_target is False
+
+
+def test_dialog_result_does_not_expose_unrelated_channel_details() -> None:
+    dialogs = [
+        ChannelDialogSummary(10, "Monster", "followgerry", True),
+        ChannelDialogSummary(30, "Private Other", "private_other", False),
+    ]
+
+    result = dialog_listing_result(dialogs, "followgerry")
+
+    assert result["channel_count"] == 2
+    assert result["target_found"] is True
+    assert result["target"] == {
+        "channel_id": 10,
+        "title": "Monster",
+        "username": "followgerry",
+        "is_target": True,
+    }
+    assert "Private Other" not in str(result)
+    assert "private_other" not in str(result)
