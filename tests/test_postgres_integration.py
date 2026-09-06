@@ -252,7 +252,7 @@ def test_cli_simulates_fixture(engine: Engine, monkeypatch, capsys, tmp_path: Pa
 
 
 def _telegram_input(**overrides: object) -> TelegramMessageInput:
-    now = datetime.now(UTC)
+    now = datetime(2026, 9, 6, 8, 0, tzinfo=UTC)
     values: dict[str, object] = {
         "channel_id": 2439599598,
         "message_id": 100,
