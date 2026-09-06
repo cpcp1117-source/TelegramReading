@@ -74,6 +74,45 @@ services:
     networks:
       - internal
 
+  collector:
+    profiles: ["telegram"]
+    image: telegram-trader-phase2-collector:${APP_IMAGE_TAG:-phase2}
+    build:
+      context: .
+      target: runtime
+    command: ["python", "-m", "telegram_trader.telegram_collector"]
+    environment:
+      APP_ENVIRONMENT: telegram_readonly
+      APP_DATABASE_HOST: db
+      APP_DATABASE_PORT: 5432
+      APP_DATABASE_NAME: telegram_trader
+      APP_DATABASE_USER: postgres
+      APP_DATABASE_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      APP_LOG_LEVEL: INFO
+      APP_SERVICE_NAME: telegram-readonly-collector
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID:-}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:-}
+      TELEGRAM_SESSION_PATH: secrets/telegram/collector
+      TELEGRAM_TARGET_USERNAME: followgerry
+      TELEGRAM_TARGET_CHANNEL_ID: "2439599598"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./secrets:/app/secrets
+      - ./media:/app/media
+    networks:
+      - internal
+      - edge
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
 volumes:
   postgres_data:
 

@@ -77,13 +77,13 @@ Phase 2 開工驗證在 Windows 中文工作路徑發現 CI portability 問題�
 2. 以 fake client／fixtures 完成 Collector 單元與整合測試。`DATA LAYER IMPLEMENTED / TESTING`
 3. 使用者在本機 terminal 完成 Telegram 互動登入。`COMPLETED`
 4. 執行 dialog listing，確認唯一允許的目標頻道 ID。`COMPLETED — 2439599598`
-5. 啟用單一頻道的 live read-only collection。
+5. 啟用單一頻道的 live read-only collection。`IMPLEMENTED / LIVE VALIDATION PENDING`
 6. 驗證 backfill、edit version、media、去重、checkpoint 與 reconnect。
 7. 執行 24 小時 soak，產出 Gate 2 acceptance package。
 
 每一步若測試失敗，留在原步驟修正與重測，不得跨入下一步或 Phase 3。
 
-目前已完成步驟 1、3、4，並實作步驟 2 的不可變訊息版本、reply／forward、media hash、checkpoint 與去重資料層。尚未啟用 live message collection，也尚未執行 Gate 2 soak。
+目前已完成步驟 1、3、4，並實作步驟 2 的不可變訊息版本、reply／forward、media hash、checkpoint 與去重資料層。步驟 5 的 Telethon NewMessage／MessageEdited handlers、history backfill 與 capped reconnect 已完成 fake-client 驗證，但尚未以目標頻道執行 live collection，也尚未執行 Gate 2 soak。
 
 ## Gate 2 Required Evidence
 

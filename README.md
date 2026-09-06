@@ -116,3 +116,11 @@ Phase 2 開工範圍、禁止事項、憑證規則與 Gate 2 驗證條件記錄�
 手機號碼、Telegram 驗證碼與 2FA 只輸入 terminal。請勿貼到聊天、`.env`、GitHub issue、log 或測試報告。Session 只會保存在 Git ignored 的 `secrets/telegram/`。
 
 `dialogs` 只輸出目標頻道摘要與總頻道數，不列出其他頻道名稱。需要回報時，只提供 `target_found`、目標的 `channel_id` 與 `username`；不要提供任何 credential 或 session 檔。
+
+目標確認後，可使用 Docker Compose 的 `telegram` profile 啟動唯讀 Collector。腳本會再次隱藏輸入 Telegram API Hash 與 PostgreSQL password，先執行 migration，再以前景模式啟動，按 `Ctrl+C` 停止：
+
+```powershell
+.\scripts\telegram-bootstrap.ps1 -Command collect
+```
+
+Collector 僅允許 `channel_id=2439599598`，輸出不含訊息原文或 credentials；圖片存於 Git ignored 的 `media/`，session 存於 `secrets/telegram/`。此命令只是 Phase 2 受控驗證，並不代表 Gate 2 或 24 小時 soak 已通過。
