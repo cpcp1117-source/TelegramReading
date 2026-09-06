@@ -3,9 +3,9 @@
 ## 1. Record Status
 
 - **Record ID:** `CHANNEL-FOLLOWGERRY-001`
-- **Record Version:** v0.1
+- **Record Version:** v0.2
 - **Recorded Date:** 2026-09-03
-- **Current Status:** `DRAFT`
+- **Current Status:** `PHASE_2_MONITOR_ONLY_CONFIRMED`
 - **Planned Phase 2 Status:** `MONITOR_ONLY`
 - **Source of User Decisions:** User-provided onboarding response on 2026-09-03
 - **Runtime Enablement:** Not available in Phase 0
@@ -20,8 +20,8 @@
 | Public username | `@followgerry` | Canonicalized from user-provided public URL |
 | Public URL | `https://t.me/followgerry` | Public source; no invite token |
 | Private channel | No | Public page returned HTTP 200 on 2026-09-03 |
-| Collector Account already joined | Not required for public-page identity; Phase 2 dialog access TBD | MTProto access is not tested in Phase 0 |
-| Numeric channel ID | TBD in Phase 2 dialog listing | Title/username are not runtime authorization identity |
+| Collector Account dialog access | Confirmed | User executed the credential-safe Phase 2 dialog listing on 2026-09-06; account identity was not disclosed |
+| Numeric channel ID | `2439599598` | Returned for the matching `followgerry` dialog on 2026-09-06 |
 | Channel type | `EXECUTION_SIGNAL` | Confirmed by user |
 | Business owner / confirmer | User | Acceptance Owner |
 
@@ -82,16 +82,17 @@ On 2026-09-03, the public Binance USDⓈ-M `exchangeInfo` response listed `CHIPU
 
 | Check | Result | Note |
 |---|---|---|
-| Public identity recorded | PASS | Numeric ID deferred to Phase 2 as designed |
+| Public identity recorded | PASS | Username and numeric ID match the Phase 2 dialog result |
 | Channel type recorded | PASS | `EXECUTION_SIGNAL` |
 | Authorization statuses recorded | PASS | All four user-declared `GRANTED` |
 | Symbol scope explicit | PASS | Dynamic, exchange-validated, fail-closed |
 | Gate 0 representative sample | PASS | One anonymized fixture |
 | Initial inventory scope | PASS | User confirmed this is the sole Phase 0 channel |
 | Gate 3 fixture set | NOT STARTED | Requires at least 20 fixtures before Gate 3 |
-| Runtime/parser behavior | NOT TESTED | Prohibited in Phase 0 |
+| Runtime read-only access | PARTIAL | Dialog access confirmed; message collection and soak not yet tested |
+| Parser behavior | NOT TESTED | Prohibited until Phase 4 |
 
-**Current Decision:** `DRAFT` — eligible for Gate 0 scope review only.
+**Current Decision:** `PHASE_2_MONITOR_ONLY_CONFIRMED` — eligible only for Phase 2 read-only collector development and validation.
 
 ## 7. Official References
 

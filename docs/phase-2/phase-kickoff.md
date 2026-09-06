@@ -18,8 +18,10 @@
 
 - channel_label: `Monster-貨幣宇宙中心`
 - public_username: `@followgerry`
+- numeric_channel_id: `2439599598`
 - channel_type: `EXECUTION_SIGNAL`
 - onboarding policy: Phase 2 僅使用此頻道；系統完成後續開發且穩定前，不加入其他頻道。
+- dialog verification: `target_found=true`，由使用者於 2026-09-06 在本機 terminal 驗證。
 
 ## In Scope
 
@@ -72,16 +74,16 @@ Phase 2 開工驗證在 Windows 中文工作路徑發現 CI portability 問題�
 ## Development Sequence Within Phase 2
 
 1. 建立 Phase 2 config contract、依賴與 credential-safe login/bootstrap。`IMPLEMENTED / AUTOMATED TESTED`
-2. 以 fake client／fixtures 完成 Collector 單元與整合測試。
-3. 使用者在本機 terminal 完成 Telegram 互動登入。
-4. 執行 dialog listing，確認唯一允許的目標頻道 ID。
+2. 以 fake client／fixtures 完成 Collector 單元與整合測試。`DATA LAYER IMPLEMENTED / TESTING`
+3. 使用者在本機 terminal 完成 Telegram 互動登入。`COMPLETED`
+4. 執行 dialog listing，確認唯一允許的目標頻道 ID。`COMPLETED — 2439599598`
 5. 啟用單一頻道的 live read-only collection。
 6. 驗證 backfill、edit version、media、去重、checkpoint 與 reconnect。
 7. 執行 24 小時 soak，產出 Gate 2 acceptance package。
 
 每一步若測試失敗，留在原步驟修正與重測，不得跨入下一步或 Phase 3。
 
-目前只完成步驟 1 與其 fake-client boundary tests；尚未執行真實 Telegram login、dialog listing、訊息收集或 Gate 2 soak。
+目前已完成步驟 1、3、4，並實作步驟 2 的不可變訊息版本、reply／forward、media hash、checkpoint 與去重資料層。尚未啟用 live message collection，也尚未執行 Gate 2 soak。
 
 ## Gate 2 Required Evidence
 

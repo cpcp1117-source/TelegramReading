@@ -50,6 +50,13 @@ class Settings(BaseSettings):
         default="followgerry",
         validation_alias=AliasChoices("TELEGRAM_TARGET_USERNAME", "APP_TELEGRAM_TARGET_USERNAME"),
     )
+    telegram_target_channel_id: int = Field(
+        default=2439599598,
+        ge=1,
+        validation_alias=AliasChoices(
+            "TELEGRAM_TARGET_CHANNEL_ID", "APP_TELEGRAM_TARGET_CHANNEL_ID"
+        ),
+    )
 
     @field_validator("database_url")
     @classmethod
@@ -111,6 +118,13 @@ class Settings(BaseSettings):
         if normalized != "followgerry":
             raise ValueError("Phase 2 permits only the followgerry channel")
         return normalized
+
+    @field_validator("telegram_target_channel_id")
+    @classmethod
+    def validate_phase_2_target_id(cls, value: int) -> int:
+        if value != 2439599598:
+            raise ValueError("Phase 2 permits only channel ID 2439599598")
+        return value
 
     @model_validator(mode="after")
     def validate_telegram_credentials_for_runtime(self) -> Settings:

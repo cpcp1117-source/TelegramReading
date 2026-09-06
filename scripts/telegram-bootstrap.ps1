@@ -25,6 +25,7 @@ try {
     $env:TELEGRAM_API_HASH = $apiHashPlain
     $env:TELEGRAM_SESSION_PATH = 'secrets/telegram/collector'
     $env:TELEGRAM_TARGET_USERNAME = 'followgerry'
+    $env:TELEGRAM_TARGET_CHANNEL_ID = '2439599598'
 
     & uv run --no-sync python -m telegram_trader.telegram_cli $Command
     $commandExitCode = $LASTEXITCODE
@@ -37,6 +38,7 @@ finally {
     Remove-Item Env:TELEGRAM_API_HASH -ErrorAction SilentlyContinue
     Remove-Item Env:TELEGRAM_SESSION_PATH -ErrorAction SilentlyContinue
     Remove-Item Env:TELEGRAM_TARGET_USERNAME -ErrorAction SilentlyContinue
+    Remove-Item Env:TELEGRAM_TARGET_CHANNEL_ID -ErrorAction SilentlyContinue
     Remove-Item Env:APP_ENVIRONMENT -ErrorAction SilentlyContinue
     $apiHashPlain = $null
     $apiHashSecure = $null

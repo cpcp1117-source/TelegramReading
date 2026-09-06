@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -25,8 +27,15 @@ from telegram_trader.models import (
     MockMessageReceipt,
     OutboxDeliveryReceipt,
     OutboxEvent,
+    TelegramCollectorCheckpoint,
+    TelegramMessageVersion,
 )
 from telegram_trader.outbox import OutboxConsumer
+from telegram_trader.telegram_storage import (
+    MediaStore,
+    TelegramMessageInput,
+    TelegramMessageProcessor,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -40,6 +49,7 @@ def engine() -> Iterator[Engine]:
         connection.execute(
             text(
                 "TRUNCATE TABLE outbox_delivery_receipts, outbox_events, "
+                "telegram_message_versions, telegram_collector_checkpoints, "
                 "mock_message_receipts, consumer_checkpoints, audit_events "
                 "RESTART IDENTITY CASCADE"
             )
@@ -239,3 +249,96 @@ def test_cli_simulates_fixture(engine: Engine, monkeypatch, capsys, tmp_path: Pa
     assert '"checkpoint": 1' in output
     assert '"duplicate": false' in output
     get_settings.cache_clear()
+
+
+def _telegram_input(**overrides: object) -> TelegramMessageInput:
+    now = datetime.now(UTC)
+    values: dict[str, object] = {
+        "channel_id": 2439599598,
+        "message_id": 100,
+        "event_kind": "NEW",
+        "source_date": now,
+        "received_at": now,
+        "text": "synthetic telegram message",
+        "content_type": "text",
+    }
+    values.update(overrides)
+    return TelegramMessageInput(**values)  # type: ignore[arg-type]
+
+
+def test_telegram_replay_and_edit_versions_are_append_only(engine: Engine, tmp_path: Path) -> None:
+    factory = create_session_factory(engine)
+    processor = TelegramMessageProcessor(factory, MediaStore(tmp_path / "media"), 2439599598)
+
+    original = processor.process(_telegram_input(text="original"))
+    replay = processor.process(_telegram_input(text="original", event_kind="BACKFILL"))
+    edited = processor.process(
+        _telegram_input(text="edited", event_kind="EDITED", edit_date=datetime.now(UTC))
+    )
+
+    assert original.edit_version == 0
+    assert replay.duplicate is True
+    assert replay.source_event_id == original.source_event_id
+    assert edited.edit_version == 1
+    assert edited.duplicate is False
+    with factory() as session:
+        versions = list(
+            session.scalars(
+                select(TelegramMessageVersion).order_by(TelegramMessageVersion.edit_version)
+            )
+        )
+        assert [version.text for version in versions] == ["original", "edited"]
+        assert session.scalar(select(func.count()).select_from(AuditEvent)) == 2
+        assert session.scalar(select(func.count()).select_from(OutboxEvent)) == 2
+
+
+def test_telegram_relationships_media_and_checkpoint_survive_restart(
+    engine: Engine, tmp_path: Path
+) -> None:
+    factory = create_session_factory(engine)
+    media_root = tmp_path / "media"
+    first = TelegramMessageProcessor(factory, MediaStore(media_root), 2439599598)
+    image = b"synthetic-image"
+
+    result = first.process(
+        _telegram_input(
+            message_id=101,
+            content_type="image",
+            reply_to_message_id=99,
+            forward_origin_type="channel",
+            forward_origin_id=123,
+            forward_message_id=456,
+            forward_date=datetime.now(UTC),
+            media_bytes=image,
+            media_filename="chart.jpg",
+            media_mime_type="image/jpeg",
+        )
+    )
+
+    restarted = TelegramMessageProcessor(factory, MediaStore(media_root), 2439599598)
+    assert restarted.checkpoint() == 101
+    assert result.media_sha256 == hashlib.sha256(image).hexdigest()
+    with factory() as session:
+        version = session.scalar(select(TelegramMessageVersion))
+        checkpoint = session.get(TelegramCollectorCheckpoint, 2439599598)
+        assert version is not None
+        assert checkpoint is not None
+        assert version.reply_to_message_id == 99
+        assert version.forward_origin_type == "channel"
+        assert version.forward_origin_id == 123
+        assert version.forward_message_id == 456
+        assert version.media_path is not None
+        assert (media_root / version.media_path).read_bytes() == image
+        assert checkpoint.last_message_id == 101
+
+
+def test_telegram_message_version_cannot_be_mutated(engine: Engine, tmp_path: Path) -> None:
+    factory = create_session_factory(engine)
+    processor = TelegramMessageProcessor(factory, MediaStore(tmp_path / "media"), 2439599598)
+    processor.process(_telegram_input())
+
+    with engine.connect() as connection, pytest.raises(DBAPIError, match="append-only"):
+        connection.execute(text("UPDATE telegram_message_versions SET text='changed'"))
+
+    with engine.connect() as connection, pytest.raises(DBAPIError, match="append-only"):
+        connection.execute(text("DELETE FROM telegram_message_versions"))

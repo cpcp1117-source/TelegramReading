@@ -20,6 +20,7 @@ def test_default_configuration_is_offline(monkeypatch: pytest.MonkeyPatch) -> No
         "TELEGRAM_API_HASH",
         "TELEGRAM_SESSION_PATH",
         "TELEGRAM_TARGET_USERNAME",
+        "TELEGRAM_TARGET_CHANNEL_ID",
     ):
         monkeypatch.delenv(variable, raising=False)
     settings = Settings()
@@ -105,3 +106,8 @@ def test_relative_telegram_session_must_be_in_ignored_secrets_directory() -> Non
 def test_phase_2_rejects_another_channel() -> None:
     with pytest.raises(ValidationError, match="only the followgerry"):
         Settings(telegram_target_username="another-channel")
+
+
+def test_phase_2_rejects_another_channel_id() -> None:
+    with pytest.raises(ValidationError, match="only channel ID 2439599598"):
+        Settings(telegram_target_channel_id=1)
