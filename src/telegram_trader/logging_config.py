@@ -8,12 +8,17 @@ from typing import Any
 
 SENSITIVE_KEYS = frozenset(
     {
+        "api_id",
         "api_hash",
         "api_key",
         "api_secret",
         "authorization",
         "bot_token",
         "password",
+        "phone",
+        "phone_number",
+        "code",
+        "two_factor",
         "secret",
         "session",
         "token",

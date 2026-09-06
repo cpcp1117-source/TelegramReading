@@ -67,11 +67,11 @@ Kickoff 時尚未提供、儲存或引入任何真實 credential。
 
 ## Baseline Validation Note
 
-Phase 2 開工驗證在 Windows 中文工作路徑發現 CI portability 問題：`uv run` 重新同步 editable package 會產生 locale-sensitive `.pth`、Windows PowerShell 對 native command 非零 exit code 未可靠 fail-fast，且不同本機執行身分可能共用無權存取的 pytest temp/cache。Phase 2 分支在功能開發前先將所有 post-sync command 固定為 `uv run --no-sync`、逐步檢查 native exit code，並隔離 pytest temp/cache，避免後續 Gate 證據出現假成功。`phase-1-accepted` tag 保持不變，修正紀錄由本分支承接。
+Phase 2 開工驗證在 Windows 中文工作路徑發現 CI portability 問題：`uv run` 或 dependency command 重新同步 editable package 會產生 locale-sensitive `.pth`、Windows PowerShell 對 native command 非零 exit code 未可靠 fail-fast，且不同本機執行身分可能共用無權存取的 pytest temp/cache。Phase 2 分支在功能開發前將 CI 固定使用獨立 non-editable `.venv-ci`、所有 post-sync command 使用 `uv run --no-sync`、逐步檢查 native exit code，並隔離 pytest temp/cache，避免後續 Gate 證據出現假成功。`phase-1-accepted` tag 保持不變，修正紀錄由本分支承接。
 
 ## Development Sequence Within Phase 2
 
-1. 建立 Phase 2 config contract、依賴與 credential-safe login/bootstrap。
+1. 建立 Phase 2 config contract、依賴與 credential-safe login/bootstrap。`IMPLEMENTED / AUTOMATED TESTED`
 2. 以 fake client／fixtures 完成 Collector 單元與整合測試。
 3. 使用者在本機 terminal 完成 Telegram 互動登入。
 4. 執行 dialog listing，確認唯一允許的目標頻道 ID。
@@ -80,6 +80,8 @@ Phase 2 開工驗證在 Windows 中文工作路徑發現 CI portability 問題�
 7. 執行 24 小時 soak，產出 Gate 2 acceptance package。
 
 每一步若測試失敗，留在原步驟修正與重測，不得跨入下一步或 Phase 3。
+
+目前只完成步驟 1 與其 fake-client boundary tests；尚未執行真實 Telegram login、dialog listing、訊息收集或 Gate 2 soak。
 
 ## Gate 2 Required Evidence
 

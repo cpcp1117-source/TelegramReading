@@ -1,6 +1,7 @@
 #!/bin/sh
 set -eu
 
+export UV_PROJECT_ENVIRONMENT=".venv-ci"
 pytest_temp_root=".pytest_tmp/posix"
 mkdir -p "$pytest_temp_root"
 

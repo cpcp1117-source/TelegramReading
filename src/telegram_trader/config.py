@@ -1,26 +1,28 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import URL, make_url
 
-OfflineEnvironment = Literal["offline"]
+RuntimeEnvironment = Literal["offline", "telegram_readonly"]
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
 
 class Settings(BaseSettings):
-    """Phase 1 configuration with an intentionally offline-only environment."""
+    """Stage-gated configuration for offline and Telegram read-only operation."""
 
     model_config = SettingsConfigDict(
         env_prefix="APP_",
         case_sensitive=False,
         extra="forbid",
+        populate_by_name=True,
     )
 
-    environment: OfflineEnvironment = "offline"
+    environment: RuntimeEnvironment = "offline"
     database_url: str | None = None
     database_host: str = "localhost"
     database_port: int = Field(default=5432, ge=1, le=65535)
@@ -31,6 +33,23 @@ class Settings(BaseSettings):
     service_name: str = "offline-foundation"
     http_host: str = "127.0.0.1"
     http_port: int = Field(default=8080, ge=1, le=65535)
+    telegram_api_id: int | None = Field(
+        default=None,
+        ge=1,
+        validation_alias=AliasChoices("TELEGRAM_API_ID", "APP_TELEGRAM_API_ID"),
+    )
+    telegram_api_hash: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("TELEGRAM_API_HASH", "APP_TELEGRAM_API_HASH"),
+    )
+    telegram_session_path: Path = Field(
+        default=Path("secrets/telegram/collector"),
+        validation_alias=AliasChoices("TELEGRAM_SESSION_PATH", "APP_TELEGRAM_SESSION_PATH"),
+    )
+    telegram_target_username: str = Field(
+        default="followgerry",
+        validation_alias=AliasChoices("TELEGRAM_TARGET_USERNAME", "APP_TELEGRAM_TARGET_USERNAME"),
+    )
 
     @field_validator("database_url")
     @classmethod
@@ -68,6 +87,40 @@ class Settings(BaseSettings):
         if value is not None and not value.get_secret_value():
             raise ValueError("database password cannot be blank")
         return value
+
+    @field_validator("telegram_api_hash")
+    @classmethod
+    def validate_non_empty_telegram_api_hash(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None and not value.get_secret_value().strip():
+            raise ValueError("Telegram API hash cannot be blank")
+        return value
+
+    @field_validator("telegram_session_path")
+    @classmethod
+    def validate_telegram_session_path(cls, value: Path) -> Path:
+        if not value.parts:
+            raise ValueError("Telegram session path is required")
+        if not value.is_absolute() and value.parts[0].lower() != "secrets":
+            raise ValueError("relative Telegram session path must be inside secrets/")
+        return value
+
+    @field_validator("telegram_target_username")
+    @classmethod
+    def validate_phase_2_target(cls, value: str) -> str:
+        normalized = value.strip().removeprefix("https://t.me/").removeprefix("@").lower()
+        if normalized != "followgerry":
+            raise ValueError("Phase 2 permits only the followgerry channel")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_telegram_credentials_for_runtime(self) -> Settings:
+        if self.environment == "telegram_readonly" and (
+            self.telegram_api_id is None or self.telegram_api_hash is None
+        ):
+            raise ValueError(
+                "TELEGRAM_API_ID and TELEGRAM_API_HASH are required for telegram_readonly"
+            )
+        return self
 
     @property
     def sqlalchemy_database_url(self) -> URL:

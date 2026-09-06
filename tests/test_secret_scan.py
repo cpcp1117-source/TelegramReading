@@ -39,6 +39,18 @@ def test_secret_scanner_ignores_excluded_directory(tmp_path: Path) -> None:
     assert findings == []
 
 
+def test_secret_scanner_ignores_isolated_ci_environment(tmp_path: Path) -> None:
+    excluded = tmp_path / ".venv-ci"
+    excluded.mkdir()
+    marker = "-----BEGIN " + "PRIVATE KEY-----"
+    (excluded / "dependency.py").write_text(marker, encoding="utf-8")
+
+    count, findings = scan(tmp_path)
+
+    assert count == 0
+    assert findings == []
+
+
 def test_secret_scanner_detects_non_placeholder_assignment(tmp_path: Path) -> None:
     field_name = "api_" + "key"
     (tmp_path / "leak.env").write_text(f"{field_name}=not-a-placeholder\n", encoding="utf-8")
@@ -72,6 +84,32 @@ def test_secret_scanner_detects_python_secret_literal(tmp_path: Path) -> None:
     field_name = "database_" + "password"
     (tmp_path / "config.py").write_text(
         f'{field_name} = "not-a-placeholder"\n',
+        encoding="utf-8",
+    )
+
+    _, findings = scan(tmp_path)
+
+    assert len(findings) == 1
+    assert "credential assignment" in findings[0]
+
+
+def test_secret_scanner_accepts_powershell_variable_indirection(tmp_path: Path) -> None:
+    field_name = "TELEGRAM_API_" + "HASH"
+    (tmp_path / "safe.ps1").write_text(
+        f"$env:{field_name} = $credentialValue\n",
+        encoding="utf-8",
+    )
+
+    count, findings = scan(tmp_path)
+
+    assert count == 1
+    assert findings == []
+
+
+def test_secret_scanner_detects_powershell_credential_literal(tmp_path: Path) -> None:
+    field_name = "TELEGRAM_API_" + "HASH"
+    (tmp_path / "leak.ps1").write_text(
+        f"$env:{field_name} = 'not-a-placeholder'\n",
         encoding="utf-8",
     )
 

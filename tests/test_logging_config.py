@@ -13,6 +13,12 @@ def test_json_formatter_redacts_nested_sensitive_values() -> None:
         "nested": {"api_key": "also-hidden", "safe": "visible"},
         "items": [{"password": "hidden"}],
         "tuple": ({"secret": "hidden"},),
+        "telegram": {
+            "api_id": 12345,
+            "phone_number": "+000000000",
+            "code": "00000",
+            "two_factor": "hidden",
+        },
     }
 
     payload = json.loads(JsonFormatter().format(record))
@@ -22,6 +28,10 @@ def test_json_formatter_redacts_nested_sensitive_values() -> None:
     assert payload["context"]["nested"]["safe"] == "visible"
     assert payload["context"]["items"][0]["password"] == "[REDACTED]"
     assert payload["context"]["tuple"][0]["secret"] == "[REDACTED]"
+    assert payload["context"]["telegram"]["api_id"] == "[REDACTED]"
+    assert payload["context"]["telegram"]["phone_number"] == "[REDACTED]"
+    assert payload["context"]["telegram"]["code"] == "[REDACTED]"
+    assert payload["context"]["telegram"]["two_factor"] == "[REDACTED]"
     assert "value-never-rendered" not in json.dumps(payload)
 
 

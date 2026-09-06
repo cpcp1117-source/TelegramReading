@@ -97,3 +97,20 @@ Gate 1 was explicitly accepted by the user on 2026-09-06 and is preserved by the
 Active branch: `phase/2-telegram-readonly-collector`
 
 Phase 2 開工範圍、禁止事項、憑證規則與 Gate 2 驗證條件記錄於 [Phase 2 Kickoff](docs/phase-2/phase-kickoff.md)。本階段只處理初始頻道 `@followgerry`，尚未引入任何 Telegram credential。
+
+### Phase 2 Safe Telegram Bootstrap
+
+先執行完整 CI 建立隔離的 `.venv-ci`：
+
+```powershell
+.\scripts\ci.ps1
+```
+
+再於本機 terminal 互動登入。腳本會隱藏 API Hash，並在結束時移除 process environment credentials：
+
+```powershell
+.\scripts\telegram-bootstrap.ps1 -Command login
+.\scripts\telegram-bootstrap.ps1 -Command dialogs
+```
+
+手機號碼、Telegram 驗證碼與 2FA 只輸入 terminal。請勿貼到聊天、`.env`、GitHub issue、log 或測試報告。Session 只會保存在 Git ignored 的 `secrets/telegram/`。

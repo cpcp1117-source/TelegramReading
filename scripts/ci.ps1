@@ -1,5 +1,6 @@
 $ErrorActionPreference = 'Stop'
 $env:PYTHONUTF8 = '1'
+$env:UV_PROJECT_ENVIRONMENT = '.venv-ci'
 $ciUserName = if ([string]::IsNullOrWhiteSpace($env:USERNAME)) { 'ci' } else { $env:USERNAME }
 $safeCiUserName = $ciUserName -replace '[^A-Za-z0-9_.-]', '_'
 $pytestTempRoot = Join-Path '.pytest_tmp' $safeCiUserName

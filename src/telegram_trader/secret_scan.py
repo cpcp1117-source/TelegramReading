@@ -13,6 +13,7 @@ EXCLUDED_PARTS = {
     ".ruff_cache",
     ".uv-cache",
     ".venv",
+    ".venv-ci",
     "__pycache__",
     "htmlcov",
 }
@@ -24,6 +25,7 @@ TEXT_SUFFIXES = {
     ".ini",
     ".json",
     ".md",
+    ".ps1",
     ".py",
     ".sh",
     ".sql",
@@ -82,7 +84,7 @@ def scan_file(path: Path) -> list[str]:
         for match in assignment_pattern.finditer(line):
             value_group = 3 if assignment_pattern is PYTHON_CREDENTIAL_LITERAL_ASSIGNMENT else 2
             value = match.group(value_group).strip().lower()
-            if value not in PLACEHOLDERS and not value.startswith(("${", "<", "{{")):
+            if value not in PLACEHOLDERS and not value.startswith(("$", "<", "{{")):
                 findings.append(f"{path}:{line_number}: non-placeholder credential assignment")
     return findings
 

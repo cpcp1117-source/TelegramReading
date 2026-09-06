@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from pydantic import SecretStr, ValidationError
 
@@ -14,6 +16,10 @@ def test_default_configuration_is_offline(monkeypatch: pytest.MonkeyPatch) -> No
         "APP_DATABASE_NAME",
         "APP_DATABASE_USER",
         "APP_DATABASE_PASSWORD",
+        "TELEGRAM_API_ID",
+        "TELEGRAM_API_HASH",
+        "TELEGRAM_SESSION_PATH",
+        "TELEGRAM_TARGET_USERNAME",
     ):
         monkeypatch.delenv(variable, raising=False)
     settings = Settings()
@@ -65,3 +71,37 @@ def test_cached_settings_can_be_loaded() -> None:
     get_settings.cache_clear()
     assert get_settings().environment == "offline"
     get_settings.cache_clear()
+
+
+def test_telegram_readonly_requires_both_credentials() -> None:
+    with pytest.raises(ValidationError, match="TELEGRAM_API_ID and TELEGRAM_API_HASH"):
+        Settings(environment="telegram_readonly")
+
+
+def test_telegram_credentials_load_from_unprefixed_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    credential_value = "placeholder"
+    monkeypatch.setenv("APP_ENVIRONMENT", "telegram_readonly")
+    monkeypatch.setenv("TELEGRAM_API_ID", "12345")
+    monkeypatch.setenv("TELEGRAM_API_HASH", credential_value)
+    monkeypatch.setenv("TELEGRAM_SESSION_PATH", str(tmp_path / "collector"))
+    monkeypatch.setenv("TELEGRAM_TARGET_USERNAME", "https://t.me/followgerry")
+
+    settings = Settings()
+
+    assert settings.telegram_api_id == 12345
+    assert settings.telegram_api_hash is not None
+    assert settings.telegram_api_hash.get_secret_value() == credential_value
+    assert credential_value not in repr(settings.telegram_api_hash)
+    assert settings.telegram_target_username == "followgerry"
+
+
+def test_relative_telegram_session_must_be_in_ignored_secrets_directory() -> None:
+    with pytest.raises(ValidationError, match="inside secrets"):
+        Settings(telegram_session_path=Path("collector"))
+
+
+def test_phase_2_rejects_another_channel() -> None:
+    with pytest.raises(ValidationError, match="only the followgerry"):
+        Settings(telegram_target_username="another-channel")
