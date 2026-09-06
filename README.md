@@ -5,14 +5,14 @@
 ## Current Status
 
 - Completed phases: `Phase 0 — Requirements and Architecture`; `Phase 1 — Offline Foundation`
-- Active phase: `Phase 2 — Telegram Read-only Collector` (authorized; branch creation pending)
-- Gate status: `Phase 0 READY + USER_ACCEPTED`; `Phase 1 READY + USER_ACCEPTED`
+- Active phase: `Phase 2 — Telegram Read-only Collector` (IN PROGRESS)
+- Gate status: `Phase 0 READY + USER_ACCEPTED`; `Phase 1 READY + USER_ACCEPTED`; `Gate 2 NOT EVALUATED`
 - Runtime code: Phase 1 offline-only skeleton exists
-- External credentials: 不需要，且不得加入工作區
-- Git branch: `phase/1-offline-foundation`
+- External credentials: Phase 2 僅允許透過本機 terminal 引入 Telegram credentials；不得加入工作區、Git、log 或報告
+- Git branch: `phase/2-telegram-readonly-collector`
 - Git remote: `https://github.com/cpcp1117-source/TelegramReading.git`
 - Initial channel scope: only `@followgerry`; future channels require separate onboarding after the current system is stable
-- Next permitted action: merge Phase 1, create `phase-1-accepted`, then create the Phase 2 branch
+- Next permitted action: implement and verify only the Phase 2 read-only Telegram collector scope
 
 ## Phase 0 Deliverables
 
@@ -34,7 +34,7 @@
 
 ## Gate Rule
 
-Gate 0 re-review 為 `READY`，使用者已於 2026-09-03 明確批准 Specification v0.2。Phase 1 必須在獨立 branch 僅開發 Offline Foundation；Telegram、Binance、OpenAI 與真實交易能力仍禁止。
+Gate 0 re-review 為 `READY`，使用者已於 2026-09-03 明確批准 Specification v0.2。Phase 1 已於 2026-09-06 取得使用者驗收、合併至 `main`，並建立 `phase-1-accepted` tag。Phase 2 僅可開發 Telegram read-only collector；Binance、OpenAI、訊號解析與真實交易能力仍禁止。
 
 ## Phase 1 — Offline Foundation
 
@@ -80,7 +80,7 @@ docker compose --profile test run --rm test alembic upgrade head
 docker compose --profile test run --rm test pytest --cov --cov-report=term-missing
 ```
 
-Gate 1 remains unaccepted until all required evidence is recorded, the review verdict is `READY`, and the user explicitly accepts it.
+Gate 1 was explicitly accepted by the user on 2026-09-06 and is preserved by the `phase-1-accepted` tag.
 
 ### Gate 1 Acceptance Package
 
@@ -91,3 +91,9 @@ Gate 1 remains unaccepted until all required evidence is recorded, the review ve
 - [Known Issues](docs/phase-1/known-issues.md)
 - [Delivery Quality Review](docs/phase-1/quality-review.md)
 - [Gate 1 Checklist](docs/phase-1/gate-1-checklist.md)
+
+## Phase 2 — Telegram Read-only Collector
+
+Active branch: `phase/2-telegram-readonly-collector`
+
+Phase 2 開工範圍、禁止事項、憑證規則與 Gate 2 驗證條件記錄於 [Phase 2 Kickoff](docs/phase-2/phase-kickoff.md)。本階段只處理初始頻道 `@followgerry`，尚未引入任何 Telegram credential。
