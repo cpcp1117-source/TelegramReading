@@ -1,9 +1,10 @@
-name: Phase 1 CI
+name: Phase 1-2 CI
 
 on:
   push:
     branches:
       - phase/1-offline-foundation
+      - phase/2-telegram-readonly-collector
   pull_request:
     branches:
       - main
