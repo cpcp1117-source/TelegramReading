@@ -5,7 +5,9 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 import pytest
+from telethon.tl.types import PeerChannel  # type: ignore[import-untyped]
 
+from telegram_trader.config import TelegramChannelTarget
 from telegram_trader.telegram_collector import (
     TelethonReadOnlyCollector,
     reconnect_delay,
@@ -14,6 +16,13 @@ from telegram_trader.telegram_collector import (
 from telegram_trader.telegram_storage import TelegramMessageInput
 
 NOW = datetime(2026, 9, 6, 9, 0, tzinfo=UTC)
+
+FOLLOWGERRY_TARGET = TelegramChannelTarget(
+    channel_id=2439599598, topic_id=None, username="followgerry", label="Monster"
+)
+BTC_ETH_TOPIC_TARGET = TelegramChannelTarget(
+    channel_id=2382278102, topic_id=21, username=None, label="Bonnie-BTC ETH"
+)
 
 
 @dataclass
@@ -37,6 +46,13 @@ class FakeForward:
 
 
 @dataclass
+class FakeReplyHeader:
+    forum_topic: bool = False
+    reply_to_top_id: int | None = None
+    reply_to_msg_id: int | None = None
+
+
+@dataclass
 class FakeMessage:
     id: int
     message: str | None = "message"
@@ -44,6 +60,7 @@ class FakeMessage:
     date: datetime = NOW
     edit_date: datetime | None = None
     reply_to_msg_id: int | None = None
+    reply_to: FakeReplyHeader | None = None
     fwd_from: FakeForward | None = None
     photo: object | None = None
     file: FakeFile | None = None
@@ -62,13 +79,20 @@ class FakeClient:
         self.started = False
         self.disconnected = False
         self.raise_on_run = False
+        self.dialogs_fetched = False
 
     async def download_media(self, message: object, *, file: type[bytes]) -> bytes:
         assert file is bytes
         return b"synthetic-image"
 
-    async def get_entity(self, username: str) -> FakeEntity:
-        assert username == "followgerry"
+    async def get_dialogs(self) -> list[object]:
+        self.dialogs_fetched = True
+        return []
+
+    async def get_entity(self, target: object) -> FakeEntity:
+        if isinstance(target, PeerChannel):
+            return FakeEntity(target.channel_id)
+        assert target == "followgerry"
         return FakeEntity(2439599598)
 
     async def iter_messages(self, entity: object, **kwargs: object) -> AsyncIterator[FakeMessage]:
@@ -92,16 +116,17 @@ class FakeClient:
 
 
 class FakeSink:
-    def __init__(self, checkpoint: int = 0) -> None:
-        self.value = checkpoint
+    def __init__(self, checkpoints: dict[tuple[int, int | None], int] | None = None) -> None:
+        self.values: dict[tuple[int, int | None], int] = dict(checkpoints or {})
         self.messages: list[TelegramMessageInput] = []
 
-    def checkpoint(self) -> int:
-        return self.value
+    def checkpoint(self, channel_id: int, topic_id: int | None = None) -> int:
+        return self.values.get((channel_id, topic_id), 0)
 
     def process(self, message: TelegramMessageInput) -> object:
         self.messages.append(message)
-        self.value = max(self.value, message.message_id)
+        key = (message.channel_id, message.topic_id)
+        self.values[key] = max(self.values.get(key, 0), message.message_id)
         return message
 
 
@@ -127,47 +152,96 @@ async def test_message_conversion_preserves_caption_image_reply_and_forward() ->
     assert prepared.forward_origin_type == "channel"
     assert prepared.forward_origin_id == 777
     assert prepared.forward_message_id == 88
+    assert prepared.topic_id is None
+
+
+@pytest.mark.anyio
+async def test_message_conversion_extracts_topic_id_from_reply_to_top_id() -> None:
+    message = FakeMessage(id=124, reply_to=FakeReplyHeader(forum_topic=True, reply_to_top_id=21))
+
+    prepared = await telegram_message_input(FakeClient(), message, "NEW", NOW)
+
+    assert prepared.topic_id == 21
+
+
+@pytest.mark.anyio
+async def test_message_conversion_falls_back_to_reply_to_msg_id_for_topic_root_reply() -> None:
+    message = FakeMessage(
+        id=125, reply_to=FakeReplyHeader(forum_topic=True, reply_to_top_id=None, reply_to_msg_id=21)
+    )
+
+    prepared = await telegram_message_input(FakeClient(), message, "NEW", NOW)
+
+    assert prepared.topic_id == 21
+
+
+@pytest.mark.anyio
+async def test_message_conversion_ignores_non_forum_reply() -> None:
+    message = FakeMessage(id=126, reply_to=FakeReplyHeader(forum_topic=False, reply_to_msg_id=99))
+
+    prepared = await telegram_message_input(FakeClient(), message, "NEW", NOW)
+
+    assert prepared.topic_id is None
 
 
 @pytest.mark.anyio
 async def test_backfill_uses_overlap_and_persists_in_message_order() -> None:
     client = FakeClient([FakeMessage(105), FakeMessage(101), FakeMessage(103)])
-    sink = FakeSink(checkpoint=100)
+    sink = FakeSink(checkpoints={(2439599598, None): 100})
     collector = TelethonReadOnlyCollector(
         client,
         sink,
-        target_username="followgerry",
-        expected_channel_id=2439599598,
+        targets=[FOLLOWGERRY_TARGET],
         initial_backfill_limit=50,
         backfill_overlap=10,
         clock=lambda: NOW,
     )
 
-    count = await collector.backfill(FakeEntity(2439599598))
+    count = await collector.backfill(FOLLOWGERRY_TARGET, FakeEntity(2439599598))
 
     assert count == 3
-    assert client.iter_arguments == {"min_id": 90, "limit": 50}
+    assert client.iter_arguments == {"min_id": 90, "limit": 50, "reply_to": None}
     assert [message.message_id for message in sink.messages] == [101, 103, 105]
     assert all(message.event_kind == "BACKFILL" for message in sink.messages)
+
+
+@pytest.mark.anyio
+async def test_backfill_passes_topic_id_as_reply_to() -> None:
+    client = FakeClient([FakeMessage(50, peer_id=FakePeer(2382278102))])
+    sink = FakeSink()
+    collector = TelethonReadOnlyCollector(client, sink, targets=[BTC_ETH_TOPIC_TARGET])
+
+    await collector.backfill(BTC_ETH_TOPIC_TARGET, FakeEntity(2382278102))
+
+    assert client.iter_arguments["reply_to"] == 21
+
+
+@pytest.mark.anyio
+async def test_resolve_targets_supports_username_and_numeric_id() -> None:
+    client = FakeClient()
+    collector = TelethonReadOnlyCollector(
+        client, FakeSink(), targets=[FOLLOWGERRY_TARGET, BTC_ETH_TOPIC_TARGET]
+    )
+
+    entities = await collector.resolve_targets()
+
+    assert client.dialogs_fetched is True
+    assert entities[2439599598].id == 2439599598
+    assert entities[2382278102].id == 2382278102
 
 
 @pytest.mark.anyio
 async def test_target_id_mismatch_fails_closed() -> None:
     client = FakeClient()
 
-    async def wrong_entity(_username: str) -> FakeEntity:
+    async def wrong_entity(_target: object) -> FakeEntity:
         return FakeEntity(1)
 
     client.get_entity = wrong_entity  # type: ignore[assignment]
-    collector = TelethonReadOnlyCollector(
-        client,
-        FakeSink(),
-        target_username="followgerry",
-        expected_channel_id=2439599598,
-    )
+    collector = TelethonReadOnlyCollector(client, FakeSink(), targets=[FOLLOWGERRY_TARGET])
 
     with pytest.raises(ValueError, match="does not match"):
-        await collector.resolve_target()
+        await collector.resolve_targets()
 
 
 @pytest.mark.anyio
@@ -177,8 +251,7 @@ async def test_connection_removes_handlers_after_disconnect_error() -> None:
     collector = TelethonReadOnlyCollector(
         client,
         FakeSink(),
-        target_username="followgerry",
-        expected_channel_id=2439599598,
+        targets=[FOLLOWGERRY_TARGET],
         clock=lambda: NOW,
     )
 

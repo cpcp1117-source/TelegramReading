@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('login', 'dialogs', 'collect')]
+    [ValidateSet('login', 'dialogs', 'discover-private', 'preview', 'collect')]
     [string]$Command = 'login'
 )
 
@@ -7,9 +7,42 @@ $ErrorActionPreference = 'Stop'
 $env:PYTHONUTF8 = '1'
 $env:UV_PROJECT_ENVIRONMENT = '.venv-ci'
 
-$apiIdInput = Read-Host 'Telegram API ID (terminal only)'
-$apiHashSecure = Read-Host 'Telegram API Hash (hidden; terminal only)' -AsSecureString
-$apiHashPlain = [System.Net.NetworkCredential]::new('', $apiHashSecure).Password
+function Read-DotEnvValue {
+    # Reads one KEY=VALUE line from a local, git-ignored .env file. Never echoes the value.
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Key
+    )
+    if (-not (Test-Path $Path)) { return $null }
+    $line = Get-Content $Path -ErrorAction SilentlyContinue |
+        Where-Object { $_ -match "^\s*$Key\s*=" } |
+        Select-Object -Last 1
+    if (-not $line) { return $null }
+    $value = ($line -replace "^\s*$Key\s*=", '').Trim()
+    if ($value.Length -ge 2 -and $value.StartsWith('"') -and $value.EndsWith('"')) {
+        $value = $value.Substring(1, $value.Length - 2)
+    }
+    if ([string]::IsNullOrWhiteSpace($value)) { return $null }
+    return $value
+}
+
+$dotEnvPath = Join-Path $PSScriptRoot '..\.env'
+$apiIdInput = Read-DotEnvValue -Path $dotEnvPath -Key 'TELEGRAM_API_ID'
+$apiHashPlain = Read-DotEnvValue -Path $dotEnvPath -Key 'TELEGRAM_API_HASH'
+$apiHashSecure = $null
+
+if ($apiIdInput -and $apiHashPlain) {
+    Write-Host 'Using TELEGRAM_API_ID / TELEGRAM_API_HASH from local .env (not shown).'
+}
+else {
+    if (-not $apiIdInput) {
+        $apiIdInput = Read-Host 'Telegram API ID (terminal only)'
+    }
+    if (-not $apiHashPlain) {
+        $apiHashSecure = Read-Host 'Telegram API Hash (hidden; terminal only)' -AsSecureString
+        $apiHashPlain = [System.Net.NetworkCredential]::new('', $apiHashSecure).Password
+    }
+}
 $databasePasswordSecure = $null
 $databasePasswordPlain = $null
 
@@ -34,8 +67,6 @@ try {
     $env:TELEGRAM_API_ID = $parsedApiId.ToString()
     $env:TELEGRAM_API_HASH = $apiHashPlain
     $env:TELEGRAM_SESSION_PATH = 'secrets/telegram/collector'
-    $env:TELEGRAM_TARGET_USERNAME = 'followgerry'
-    $env:TELEGRAM_TARGET_CHANNEL_ID = '2439599598'
 
     if ($Command -eq 'collect') {
         $env:POSTGRES_PASSWORD = $databasePasswordPlain
@@ -57,8 +88,6 @@ finally {
     Remove-Item Env:TELEGRAM_API_ID -ErrorAction SilentlyContinue
     Remove-Item Env:TELEGRAM_API_HASH -ErrorAction SilentlyContinue
     Remove-Item Env:TELEGRAM_SESSION_PATH -ErrorAction SilentlyContinue
-    Remove-Item Env:TELEGRAM_TARGET_USERNAME -ErrorAction SilentlyContinue
-    Remove-Item Env:TELEGRAM_TARGET_CHANNEL_ID -ErrorAction SilentlyContinue
     Remove-Item Env:APP_ENVIRONMENT -ErrorAction SilentlyContinue
     Remove-Item Env:POSTGRES_PASSWORD -ErrorAction SilentlyContinue
     $apiHashPlain = $null

@@ -12,10 +12,11 @@ Use one copy per Telegram Source Channel. Do not include login codes, phone numb
 | Private channel | Yes / No |
 | Collector Account already joined | Yes / No |
 | Numeric channel ID | Filled by Phase 2 dialog listing |
+| Numeric topic ID (forum topic only) | Leave blank if this is a whole channel, not one topic inside a forum-style group |
 | Channel type | `ANALYSIS` / `EXECUTION_SIGNAL` |
 | Business owner / confirmer | User |
 
-For a private channel, do not paste the invite URL. Join it through the official Telegram client, then let the Phase 2 read-only dialog listing resolve the numeric identity.
+For a private channel, do not paste the invite URL. Join it through the official Telegram client, then run `telegram-bootstrap.ps1 discover-private` to list already-joined channels that have no public username (title + numeric channel ID only) and resolve the numeric identity from there.
 
 ## B. Authorization and Content Policy
 

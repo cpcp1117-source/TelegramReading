@@ -28,6 +28,7 @@ class TelegramMessageInput:
     event_kind: TelegramEventKind
     source_date: datetime
     received_at: datetime
+    topic_id: int | None = None
     text: str | None = None
     content_type: TelegramContentType = "empty"
     edit_date: datetime | None = None
@@ -43,6 +44,8 @@ class TelegramMessageInput:
     def __post_init__(self) -> None:
         if self.channel_id <= 0 or self.message_id <= 0:
             raise ValueError("Telegram channel_id and message_id must be positive")
+        if self.topic_id is not None and self.topic_id <= 0:
+            raise ValueError("topic_id must be positive")
         if self.reply_to_message_id is not None and self.reply_to_message_id <= 0:
             raise ValueError("reply_to_message_id must be positive")
         if self.forward_origin_id is not None and self.forward_origin_id <= 0:
@@ -138,28 +141,38 @@ def _stable_id(namespace: str, value: str) -> str:
     return hashlib.sha256(f"{namespace}:{value}".encode()).hexdigest()
 
 
+def _checkpoint_key(channel_id: int, topic_id: int | None) -> tuple[int, int]:
+    """`telegram_collector_checkpoints.topic_id` uses `0` as its "no topic" sentinel."""
+    return (channel_id, topic_id or 0)
+
+
 class TelegramMessageProcessor:
     def __init__(
         self,
         session_factory: sessionmaker[Session],
         media_store: MediaStore,
-        expected_channel_id: int,
+        expected_targets: frozenset[tuple[int, int | None]],
     ) -> None:
-        if expected_channel_id <= 0:
-            raise ValueError("expected_channel_id must be positive")
+        if not expected_targets:
+            raise ValueError("at least one expected target is required")
+        if any(channel_id <= 0 for channel_id, _ in expected_targets):
+            raise ValueError("expected target channel_id must be positive")
         self._session_factory = session_factory
         self._media_store = media_store
-        self._expected_channel_id = expected_channel_id
+        self._expected_targets = expected_targets
 
-    def checkpoint(self) -> int:
+    def checkpoint(self, channel_id: int, topic_id: int | None = None) -> int:
         with self._session_factory() as session:
-            checkpoint = session.get(TelegramCollectorCheckpoint, self._expected_channel_id)
+            checkpoint = session.get(
+                TelegramCollectorCheckpoint, _checkpoint_key(channel_id, topic_id)
+            )
             return checkpoint.last_message_id if checkpoint is not None else 0
 
     def process(self, message: TelegramMessageInput) -> TelegramPersistResult:
-        if message.channel_id != self._expected_channel_id:
-            raise ValueError("message channel is not the Phase 2 allowlisted channel")
+        if (message.channel_id, message.topic_id) not in self._expected_targets:
+            raise ValueError("message target is not an allowlisted (channel_id, topic_id)")
         content_hash, media_sha256 = content_fingerprint(message)
+        checkpoint_key = _checkpoint_key(message.channel_id, message.topic_id)
 
         with self._session_factory.begin() as session:
             versions = list(
@@ -177,7 +190,7 @@ class TelegramMessageProcessor:
                 (version for version in versions if version.content_hash == content_hash), None
             )
             checkpoint = session.get(
-                TelegramCollectorCheckpoint, message.channel_id, with_for_update=True
+                TelegramCollectorCheckpoint, checkpoint_key, with_for_update=True
             )
             checkpoint_value = checkpoint.last_message_id if checkpoint is not None else 0
             if duplicate is not None:
@@ -235,6 +248,7 @@ class TelegramMessageProcessor:
                 TelegramMessageVersion(
                     source_event_id=source_event_id,
                     channel_id=message.channel_id,
+                    topic_id=message.topic_id,
                     message_id=message.message_id,
                     edit_version=edit_version,
                     event_kind=message.event_kind,
@@ -261,7 +275,8 @@ class TelegramMessageProcessor:
             if checkpoint is None:
                 session.add(
                     TelegramCollectorCheckpoint(
-                        channel_id=message.channel_id,
+                        channel_id=checkpoint_key[0],
+                        topic_id=checkpoint_key[1],
                         last_message_id=next_checkpoint,
                     )
                 )

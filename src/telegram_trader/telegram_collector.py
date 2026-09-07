@@ -3,14 +3,15 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol, cast
 
 from telethon import events  # type: ignore[import-untyped]
+from telethon.tl.types import PeerChannel  # type: ignore[import-untyped]
 
-from telegram_trader.config import get_settings
+from telegram_trader.config import TelegramChannelTarget, get_settings
 from telegram_trader.db import create_db_engine, create_session_factory
 from telegram_trader.logging_config import configure_logging
 from telegram_trader.telegram_readonly import create_client
@@ -27,7 +28,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 class TelegramMessageSink(Protocol):
-    def checkpoint(self) -> int: ...
+    def checkpoint(self, channel_id: int, topic_id: int | None = None) -> int: ...
 
     def process(self, message: TelegramMessageInput) -> object: ...
 
@@ -53,6 +54,22 @@ def _forward_origin(
     if from_name:
         return "hidden", None
     return None, None
+
+
+def _topic_id(message: Any) -> int | None:
+    """A forum-topic id, or None for a plain channel/non-topic message.
+
+    Telegram's own quirk: a message that replies directly to a topic's root
+    only sets `reply_to_msg_id` (the root id), not `reply_to_top_id`.
+    """
+    reply_to = getattr(message, "reply_to", None)
+    if reply_to is None or not getattr(reply_to, "forum_topic", False):
+        return None
+    top_id = getattr(reply_to, "reply_to_top_id", None)
+    if top_id is not None:
+        return int(top_id)
+    msg_id = getattr(reply_to, "reply_to_msg_id", None)
+    return int(msg_id) if msg_id is not None else None
 
 
 async def telegram_message_input(
@@ -113,6 +130,7 @@ async def telegram_message_input(
         event_kind=event_kind,
         source_date=message.date,
         received_at=received_at,
+        topic_id=_topic_id(message),
         text=text,
         content_type=content_type,
         edit_date=getattr(message, "edit_date", None),
@@ -133,32 +151,59 @@ class TelethonReadOnlyCollector:
         client: Any,
         sink: TelegramMessageSink,
         *,
-        target_username: str,
-        expected_channel_id: int,
+        targets: Sequence[TelegramChannelTarget],
         initial_backfill_limit: int = 500,
         backfill_overlap: int = 100,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
+        if not targets:
+            raise ValueError("at least one target is required")
         self._client = client
         self._sink = sink
-        self._target_username = target_username
-        self._expected_channel_id = expected_channel_id
+        self._targets = list(targets)
         self._initial_backfill_limit = initial_backfill_limit
         self._backfill_overlap = backfill_overlap
         self._clock = clock or (lambda: datetime.now(UTC))
 
-    async def resolve_target(self) -> Any:
-        entity = await self._client.get_entity(self._target_username)
-        if int(entity.id) != self._expected_channel_id:
-            raise ValueError("resolved Telegram entity does not match allowlisted channel ID")
-        return entity
+    async def resolve_targets(self) -> dict[int, Any]:
+        """Resolve one entity per distinct channel_id across all configured targets."""
+        await self._client.get_dialogs()
+        entities: dict[int, Any] = {}
+        for target in self._targets:
+            if target.channel_id in entities:
+                continue
+            if target.username:
+                entity = await self._client.get_entity(target.username)
+            else:
+                entity = await self._client.get_entity(PeerChannel(target.channel_id))
+            if int(entity.id) != target.channel_id:
+                raise ValueError(
+                    f"resolved Telegram entity does not match allowlisted channel ID "
+                    f"{target.channel_id}"
+                )
+            entities[target.channel_id] = entity
+        return entities
 
-    async def persist(self, message: Any, event_kind: TelegramEventKind) -> object:
+    def _matching_target(
+        self, channel_id: int, topic_id: int | None
+    ) -> TelegramChannelTarget | None:
+        return next(
+            (
+                target
+                for target in self._targets
+                if target.channel_id == channel_id and target.topic_id == topic_id
+            ),
+            None,
+        )
+
+    async def persist(self, message: Any, event_kind: TelegramEventKind) -> object | None:
         prepared = await telegram_message_input(self._client, message, event_kind, self._clock())
+        if self._matching_target(prepared.channel_id, prepared.topic_id) is None:
+            return None
         return self._sink.process(prepared)
 
-    async def backfill(self, entity: Any) -> int:
-        checkpoint = self._sink.checkpoint()
+    async def backfill(self, target: TelegramChannelTarget, entity: Any) -> int:
+        checkpoint = self._sink.checkpoint(target.channel_id, target.topic_id)
         min_id = max(0, checkpoint - self._backfill_overlap) if checkpoint else 0
         messages = [
             message
@@ -166,6 +211,7 @@ class TelethonReadOnlyCollector:
                 entity,
                 min_id=min_id,
                 limit=self._initial_backfill_limit,
+                reply_to=target.topic_id,
             )
         ]
         for message in sorted(messages, key=lambda item: int(item.id)):
@@ -174,7 +220,7 @@ class TelethonReadOnlyCollector:
 
     async def run_connection(self) -> None:
         await self._client.start()
-        entity = await self.resolve_target()
+        entities = await self.resolve_targets()
 
         async def on_new(event: Any) -> None:
             await self.persist(event.message, "NEW")
@@ -182,22 +228,26 @@ class TelethonReadOnlyCollector:
         async def on_edit(event: Any) -> None:
             await self.persist(event.message, "EDITED")
 
-        new_builder = events.NewMessage(chats=entity)
-        edit_builder = events.MessageEdited(chats=entity)
+        chats = list(entities.values())
+        new_builder = events.NewMessage(chats=chats)
+        edit_builder = events.MessageEdited(chats=chats)
         self._client.add_event_handler(on_new, new_builder)
         self._client.add_event_handler(on_edit, edit_builder)
         try:
-            backfilled = await self.backfill(entity)
-            LOGGER.info(
-                "telegram collector ready",
-                extra={
-                    "context": {
-                        "channel_id": self._expected_channel_id,
-                        "backfill_seen": backfilled,
-                        "checkpoint": self._sink.checkpoint(),
-                    }
-                },
-            )
+            for target in self._targets:
+                backfilled = await self.backfill(target, entities[target.channel_id])
+                LOGGER.info(
+                    "telegram collector ready",
+                    extra={
+                        "context": {
+                            "channel_id": target.channel_id,
+                            "topic_id": target.topic_id,
+                            "label": target.label,
+                            "backfill_seen": backfilled,
+                            "checkpoint": self._sink.checkpoint(target.channel_id, target.topic_id),
+                        }
+                    },
+                )
             await self._client.run_until_disconnected()
         finally:
             self._client.remove_event_handler(on_new, new_builder)
@@ -240,13 +290,12 @@ async def _run(once: bool) -> int:
     sink = TelegramMessageProcessor(
         create_session_factory(engine),
         MediaStore(Path("media")),
-        settings.telegram_target_channel_id,
+        frozenset(target.identity for target in settings.telegram_target_channels),
     )
     collector = TelethonReadOnlyCollector(
         client,
         sink,
-        target_username=settings.telegram_target_username,
-        expected_channel_id=settings.telegram_target_channel_id,
+        targets=settings.telegram_target_channels,
     )
     try:
         if once:

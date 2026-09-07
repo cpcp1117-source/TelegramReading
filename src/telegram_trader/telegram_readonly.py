@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Protocol, TypeVar, cast
+from typing import Any, Protocol, TypeVar, cast
 
 from telethon import TelegramClient  # type: ignore[import-untyped]
+from telethon.tl.types import PeerChannel  # type: ignore[import-untyped]
 
-from telegram_trader.config import Settings
+from telegram_trader.config import Settings, TelegramChannelTarget
 
 
 class TelegramEntity(Protocol):
@@ -93,27 +94,106 @@ async def account_summary(client: ReadOnlyTelegramClient) -> AccountSummary:
     return AccountSummary(account_id=account.id, username=account.username)
 
 
-async def list_channel_dialogs(
+async def find_target_dialogs(
     client: ReadOnlyTelegramClient,
-    target_username: str,
+    targets: Sequence[TelegramChannelTarget],
 ) -> list[ChannelDialogSummary]:
-    """List channel dialogs deterministically without message content."""
-    normalized_target = target_username.removeprefix("@").lower()
+    """Confirm membership for configured targets by numeric channel_id.
+
+    Matches by channel_id (not username) so it works for both public and
+    private targets. Dialogs that are not one of the configured targets are
+    never included, so unrelated channel names stay private.
+    """
+    target_channel_ids = {target.channel_id for target in targets}
+    dialogs: dict[int, ChannelDialogSummary] = {}
+    async for dialog in client.iter_dialogs():
+        if not dialog.is_channel or dialog.entity.id not in target_channel_ids:
+            continue
+        dialogs[dialog.entity.id] = ChannelDialogSummary(
+            channel_id=dialog.entity.id,
+            title=dialog.entity.title or "",
+            username=dialog.entity.username,
+            is_target=True,
+        )
+    return sorted(dialogs.values(), key=lambda item: item.channel_id)
+
+
+async def list_private_channel_dialogs(
+    client: ReadOnlyTelegramClient,
+) -> list[ChannelDialogSummary]:
+    """List already-joined channels that have no public username.
+
+    Used only for onboarding discovery: a private channel has no `@username`,
+    so a target for it can't be resolved until its numeric channel_id is known.
+    The caller must have already joined the channel through the official
+    Telegram client.
+    """
     dialogs: list[ChannelDialogSummary] = []
     async for dialog in client.iter_dialogs():
-        if not dialog.is_channel:
+        if not dialog.is_channel or dialog.entity.username:
             continue
-        username = dialog.entity.username
-        normalized_username = username.lower() if username else None
         dialogs.append(
             ChannelDialogSummary(
                 channel_id=dialog.entity.id,
                 title=dialog.entity.title or "",
-                username=username,
-                is_target=normalized_username == normalized_target,
+                username=None,
+                is_target=False,
             )
         )
-    return sorted(dialogs, key=lambda item: (not item.is_target, item.channel_id))
+    return sorted(dialogs, key=lambda item: item.channel_id)
+
+
+async def resolve_channel_entities(
+    client: Any,
+    targets: Sequence[TelegramChannelTarget],
+) -> dict[int, Any]:
+    """Resolve one entity per distinct channel_id, by username or numeric id.
+
+    `client` is the live Telethon client rather than `ReadOnlyTelegramClient`
+    because `get_dialogs`/`get_entity` aren't part of that narrow protocol.
+    """
+    await client.get_dialogs()
+    entities: dict[int, Any] = {}
+    for target in targets:
+        if target.channel_id in entities:
+            continue
+        if target.username:
+            entity = await client.get_entity(target.username)
+        else:
+            entity = await client.get_entity(PeerChannel(target.channel_id))
+        if int(entity.id) != target.channel_id:
+            raise ValueError(
+                f"resolved Telegram entity does not match allowlisted channel ID "
+                f"{target.channel_id}"
+            )
+        entities[target.channel_id] = entity
+    return entities
+
+
+async def preview_recent_messages(
+    client: Any,
+    entity: Any,
+    topic_id: int | None,
+    limit: int = 20,
+) -> list[dict[str, object]]:
+    """Read-only message preview for onboarding fixture review.
+
+    Never persists anything and never downloads media — only reports whether
+    a message has a photo, so a chart-heavy topic can still be reviewed
+    without touching the production database or media store.
+    """
+    results: list[dict[str, object]] = []
+    async for message in client.iter_messages(entity, limit=limit, reply_to=topic_id):
+        raw_text = getattr(message, "message", None)
+        results.append(
+            {
+                "message_id": int(message.id),
+                "date": message.date.isoformat(),
+                "has_photo": getattr(message, "photo", None) is not None,
+                "text": str(raw_text) if raw_text is not None else None,
+            }
+        )
+    return results
 
 
 def public_dict(value: AccountSummary | ChannelDialogSummary) -> dict[str, object]:

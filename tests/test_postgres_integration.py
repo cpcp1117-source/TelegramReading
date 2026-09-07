@@ -268,7 +268,9 @@ def _telegram_input(**overrides: object) -> TelegramMessageInput:
 
 def test_telegram_replay_and_edit_versions_are_append_only(engine: Engine, tmp_path: Path) -> None:
     factory = create_session_factory(engine)
-    processor = TelegramMessageProcessor(factory, MediaStore(tmp_path / "media"), 2439599598)
+    processor = TelegramMessageProcessor(
+        factory, MediaStore(tmp_path / "media"), frozenset({(2439599598, None)})
+    )
 
     original = processor.process(_telegram_input(text="original"))
     replay = processor.process(_telegram_input(text="original", event_kind="BACKFILL"))
@@ -297,7 +299,9 @@ def test_telegram_relationships_media_and_checkpoint_survive_restart(
 ) -> None:
     factory = create_session_factory(engine)
     media_root = tmp_path / "media"
-    first = TelegramMessageProcessor(factory, MediaStore(media_root), 2439599598)
+    first = TelegramMessageProcessor(
+        factory, MediaStore(media_root), frozenset({(2439599598, None)})
+    )
     image = b"synthetic-image"
 
     result = first.process(
@@ -315,12 +319,14 @@ def test_telegram_relationships_media_and_checkpoint_survive_restart(
         )
     )
 
-    restarted = TelegramMessageProcessor(factory, MediaStore(media_root), 2439599598)
-    assert restarted.checkpoint() == 101
+    restarted = TelegramMessageProcessor(
+        factory, MediaStore(media_root), frozenset({(2439599598, None)})
+    )
+    assert restarted.checkpoint(2439599598) == 101
     assert result.media_sha256 == hashlib.sha256(image).hexdigest()
     with factory() as session:
         version = session.scalar(select(TelegramMessageVersion))
-        checkpoint = session.get(TelegramCollectorCheckpoint, 2439599598)
+        checkpoint = session.get(TelegramCollectorCheckpoint, (2439599598, 0))
         assert version is not None
         assert checkpoint is not None
         assert version.reply_to_message_id == 99
@@ -334,7 +340,9 @@ def test_telegram_relationships_media_and_checkpoint_survive_restart(
 
 def test_telegram_message_version_cannot_be_mutated(engine: Engine, tmp_path: Path) -> None:
     factory = create_session_factory(engine)
-    processor = TelegramMessageProcessor(factory, MediaStore(tmp_path / "media"), 2439599598)
+    processor = TelegramMessageProcessor(
+        factory, MediaStore(tmp_path / "media"), frozenset({(2439599598, None)})
+    )
     processor.process(_telegram_input())
 
     with engine.connect() as connection, pytest.raises(DBAPIError, match="append-only"):
@@ -342,3 +350,28 @@ def test_telegram_message_version_cannot_be_mutated(engine: Engine, tmp_path: Pa
 
     with engine.connect() as connection, pytest.raises(DBAPIError, match="append-only"):
         connection.execute(text("DELETE FROM telegram_message_versions"))
+
+
+def test_telegram_checkpoints_are_isolated_per_topic(engine: Engine, tmp_path: Path) -> None:
+    factory = create_session_factory(engine)
+    processor = TelegramMessageProcessor(
+        factory,
+        MediaStore(tmp_path / "media"),
+        frozenset({(2382278102, 21), (2382278102, 22)}),
+    )
+
+    processor.process(_telegram_input(channel_id=2382278102, topic_id=21, message_id=50))
+    processor.process(_telegram_input(channel_id=2382278102, topic_id=22, message_id=999))
+
+    assert processor.checkpoint(2382278102, 21) == 50
+    assert processor.checkpoint(2382278102, 22) == 999
+
+
+def test_telegram_processor_rejects_unlisted_target(engine: Engine, tmp_path: Path) -> None:
+    factory = create_session_factory(engine)
+    processor = TelegramMessageProcessor(
+        factory, MediaStore(tmp_path / "media"), frozenset({(2439599598, None)})
+    )
+
+    with pytest.raises(ValueError, match="not an allowlisted"):
+        processor.process(_telegram_input(channel_id=2382278102, topic_id=21))

@@ -110,13 +110,21 @@ class MockMessageReceipt(Base):
 
 
 class TelegramCollectorCheckpoint(Base):
+    """Checkpoint identity is (channel_id, topic_id). `topic_id=0` is the sentinel for
+
+    "whole channel, no forum topic" — Postgres primary key columns cannot be NULL, so
+    this table cannot reuse the nullable-NULL convention used by `TelegramMessageVersion.topic_id`.
+    """
+
     __tablename__ = "telegram_collector_checkpoints"
     __table_args__ = (
         CheckConstraint("channel_id > 0", name="ck_telegram_checkpoint_channel_positive"),
+        CheckConstraint("topic_id >= 0", name="ck_telegram_checkpoint_topic_non_negative"),
         CheckConstraint("last_message_id >= 0", name="ck_telegram_checkpoint_message_non_negative"),
     )
 
     channel_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    topic_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, server_default="0")
     last_message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
@@ -145,6 +153,10 @@ class TelegramMessageVersion(Base):
             "media_size_bytes IS NULL OR media_size_bytes >= 0",
             name="ck_telegram_media_size_non_negative",
         ),
+        CheckConstraint(
+            "topic_id IS NULL OR topic_id > 0",
+            name="ck_telegram_topic_positive",
+        ),
         UniqueConstraint(
             "channel_id",
             "message_id",
@@ -161,6 +173,7 @@ class TelegramMessageVersion(Base):
 
     source_event_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     channel_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    topic_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     edit_version: Mapped[int] = mapped_column(Integer, nullable=False)
     event_kind: Mapped[str] = mapped_column(String(20), nullable=False)

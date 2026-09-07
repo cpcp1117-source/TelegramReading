@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr, ValidationError
 
-from telegram_trader.config import Settings, get_settings
+from telegram_trader.config import Settings, TelegramChannelTarget, get_settings
 
 
 def test_default_configuration_is_offline(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -19,8 +19,7 @@ def test_default_configuration_is_offline(monkeypatch: pytest.MonkeyPatch) -> No
         "TELEGRAM_API_ID",
         "TELEGRAM_API_HASH",
         "TELEGRAM_SESSION_PATH",
-        "TELEGRAM_TARGET_USERNAME",
-        "TELEGRAM_TARGET_CHANNEL_ID",
+        "TELEGRAM_TARGET_CHANNELS",
     ):
         monkeypatch.delenv(variable, raising=False)
     settings = Settings()
@@ -87,7 +86,6 @@ def test_telegram_credentials_load_from_unprefixed_environment(
     monkeypatch.setenv("TELEGRAM_API_ID", "12345")
     monkeypatch.setenv("TELEGRAM_API_HASH", credential_value)
     monkeypatch.setenv("TELEGRAM_SESSION_PATH", str(tmp_path / "collector"))
-    monkeypatch.setenv("TELEGRAM_TARGET_USERNAME", "https://t.me/followgerry")
 
     settings = Settings()
 
@@ -95,7 +93,6 @@ def test_telegram_credentials_load_from_unprefixed_environment(
     assert settings.telegram_api_hash is not None
     assert settings.telegram_api_hash.get_secret_value() == credential_value
     assert credential_value not in repr(settings.telegram_api_hash)
-    assert settings.telegram_target_username == "followgerry"
 
 
 def test_relative_telegram_session_must_be_in_ignored_secrets_directory() -> None:
@@ -103,11 +100,26 @@ def test_relative_telegram_session_must_be_in_ignored_secrets_directory() -> Non
         Settings(telegram_session_path=Path("collector"))
 
 
-def test_phase_2_rejects_another_channel() -> None:
-    with pytest.raises(ValidationError, match="only the followgerry"):
-        Settings(telegram_target_username="another-channel")
+def test_default_target_channels_include_followgerry_and_btc_eth_topic() -> None:
+    settings = Settings()
+
+    identities = {target.identity for target in settings.telegram_target_channels}
+
+    assert (2439599598, None) in identities
+    assert (2382278102, 21) in identities
 
 
-def test_phase_2_rejects_another_channel_id() -> None:
-    with pytest.raises(ValidationError, match="only channel ID 2439599598"):
-        Settings(telegram_target_channel_id=1)
+def test_target_channels_reject_empty_list() -> None:
+    with pytest.raises(ValidationError, match="at least one Telegram target channel"):
+        Settings(telegram_target_channels=[])
+
+
+def test_target_channels_reject_duplicate_identity() -> None:
+    duplicate = TelegramChannelTarget(channel_id=111, topic_id=None, label="A")
+    with pytest.raises(ValidationError, match="duplicate"):
+        Settings(telegram_target_channels=[duplicate, duplicate])
+
+
+def test_target_channel_topic_id_must_be_positive() -> None:
+    with pytest.raises(ValidationError):
+        TelegramChannelTarget(channel_id=1, topic_id=0, label="A")

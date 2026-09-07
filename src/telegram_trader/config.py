@@ -4,12 +4,25 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import URL, make_url
 
 RuntimeEnvironment = Literal["offline", "telegram_readonly"]
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+
+
+class TelegramChannelTarget(BaseModel):
+    """One Telegram source to collect: a whole channel, or a single forum topic within a group."""
+
+    channel_id: int = Field(gt=0)
+    topic_id: int | None = Field(default=None, gt=0)
+    username: str | None = None
+    label: str
+
+    @property
+    def identity(self) -> tuple[int, int | None]:
+        return (self.channel_id, self.topic_id)
 
 
 class Settings(BaseSettings):
@@ -46,16 +59,22 @@ class Settings(BaseSettings):
         default=Path("secrets/telegram/collector"),
         validation_alias=AliasChoices("TELEGRAM_SESSION_PATH", "APP_TELEGRAM_SESSION_PATH"),
     )
-    telegram_target_username: str = Field(
-        default="followgerry",
-        validation_alias=AliasChoices("TELEGRAM_TARGET_USERNAME", "APP_TELEGRAM_TARGET_USERNAME"),
-    )
-    telegram_target_channel_id: int = Field(
-        default=2439599598,
-        ge=1,
-        validation_alias=AliasChoices(
-            "TELEGRAM_TARGET_CHANNEL_ID", "APP_TELEGRAM_TARGET_CHANNEL_ID"
-        ),
+    telegram_target_channels: list[TelegramChannelTarget] = Field(
+        default_factory=lambda: [
+            TelegramChannelTarget(
+                channel_id=2439599598,
+                topic_id=None,
+                username="followgerry",
+                label="Monster-貨幣宇宙中心",
+            ),
+            TelegramChannelTarget(
+                channel_id=2382278102,
+                topic_id=21,
+                username=None,
+                label="邦妮區塊鏈-BTC ETH 即時更新",
+            ),
+        ],
+        validation_alias=AliasChoices("TELEGRAM_TARGET_CHANNELS", "APP_TELEGRAM_TARGET_CHANNELS"),
     )
 
     @field_validator("database_url")
@@ -111,19 +130,18 @@ class Settings(BaseSettings):
             raise ValueError("relative Telegram session path must be inside secrets/")
         return value
 
-    @field_validator("telegram_target_username")
+    @field_validator("telegram_target_channels")
     @classmethod
-    def validate_phase_2_target(cls, value: str) -> str:
-        normalized = value.strip().removeprefix("https://t.me/").removeprefix("@").lower()
-        if normalized != "followgerry":
-            raise ValueError("Phase 2 permits only the followgerry channel")
-        return normalized
-
-    @field_validator("telegram_target_channel_id")
-    @classmethod
-    def validate_phase_2_target_id(cls, value: int) -> int:
-        if value != 2439599598:
-            raise ValueError("Phase 2 permits only channel ID 2439599598")
+    def validate_telegram_target_channels(
+        cls, value: list[TelegramChannelTarget]
+    ) -> list[TelegramChannelTarget]:
+        if not value:
+            raise ValueError("at least one Telegram target channel is required")
+        identities = [target.identity for target in value]
+        if len(identities) != len(set(identities)):
+            raise ValueError(
+                "Telegram target channels must not contain duplicate (channel_id, topic_id) pairs"
+            )
         return value
 
     @model_validator(mode="after")
