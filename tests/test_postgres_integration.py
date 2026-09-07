@@ -14,7 +14,8 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session
 
 from telegram_trader import cli as cli_module
-from telegram_trader.config import Settings, get_settings
+from telegram_trader.channel_policy import evaluate_raw_collection, load_channel_policies
+from telegram_trader.config import Settings, TelegramChannelTarget, get_settings
 from telegram_trader.db import create_db_engine, create_session_factory, database_is_ready
 from telegram_trader.mock_telegram import (
     MockMessageProcessor,
@@ -23,6 +24,7 @@ from telegram_trader.mock_telegram import (
 )
 from telegram_trader.models import (
     AuditEvent,
+    ChannelPolicy,
     ConsumerCheckpoint,
     MockMessageReceipt,
     OutboxDeliveryReceipt,
@@ -50,7 +52,8 @@ def engine() -> Iterator[Engine]:
             text(
                 "TRUNCATE TABLE outbox_delivery_receipts, outbox_events, "
                 "telegram_message_versions, telegram_collector_checkpoints, "
-                "mock_message_receipts, consumer_checkpoints, audit_events "
+                "mock_message_receipts, consumer_checkpoints, audit_events, "
+                "channel_policies "
                 "RESTART IDENTITY CASCADE"
             )
         )
@@ -375,3 +378,123 @@ def test_telegram_processor_rejects_unlisted_target(engine: Engine, tmp_path: Pa
 
     with pytest.raises(ValueError, match="not an allowlisted"):
         processor.process(_telegram_input(channel_id=2382278102, topic_id=21))
+
+
+def _channel_policy(**overrides: object) -> ChannelPolicy:
+    values: dict[str, object] = {
+        "channel_id": 1,
+        "topic_id": 0,
+        "label": "Test Channel",
+        "channel_type": "ANALYSIS",
+        "symbol_scope_mode": "STATIC_ALLOWLIST",
+        "gate_decision": "MONITOR_ONLY",
+    }
+    values.update(overrides)
+    return ChannelPolicy(**values)
+
+
+def test_channel_policy_round_trip_including_jsonb_fields(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    with factory.begin() as session:
+        session.add(
+            _channel_policy(
+                channel_id=1,
+                topic_id=0,
+                allowed_symbols=["BTCUSDT", "ETHUSDT"],
+                policy_detail={"thesis_structure": "resistance then support"},
+            )
+        )
+
+    with factory() as session:
+        row = session.get(ChannelPolicy, (1, 0))
+        assert row is not None
+        assert row.allowed_symbols == ["BTCUSDT", "ETHUSDT"]
+        assert row.policy_detail == {"thesis_structure": "resistance then support"}
+        assert row.automation_authorization == "UNKNOWN"
+        assert row.raw_retention_days == 7
+
+
+def test_channel_policy_rejects_invalid_channel_type(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    with (
+        pytest.raises(IntegrityError, match="ck_channel_policy_type_valid"),
+        factory.begin() as session,
+    ):
+        session.add(_channel_policy(channel_type="NOT_A_TYPE"))
+
+
+def test_channel_policy_rejects_invalid_authorization_value(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    with (
+        pytest.raises(IntegrityError, match="ck_channel_policy_automation_auth_valid"),
+        factory.begin() as session,
+    ):
+        session.add(_channel_policy(automation_authorization="MAYBE"))
+
+
+def test_channel_policy_rejects_invalid_gate_decision(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    with (
+        pytest.raises(IntegrityError, match="ck_channel_policy_gate_decision_valid"),
+        factory.begin() as session,
+    ):
+        session.add(_channel_policy(gate_decision="SOMETIMES"))
+
+
+def test_seeded_real_channel_values_evaluate_as_authorized(engine: Engine) -> None:
+    """Regression guard: today's declared markdown values must still gate to allowed=True."""
+    factory = create_session_factory(engine)
+    with factory.begin() as session:
+        session.add(
+            _channel_policy(
+                channel_id=2439599598,
+                topic_id=0,
+                label="Monster-貨幣宇宙中心",
+                username="followgerry",
+                channel_type="EXECUTION_SIGNAL",
+                access_authorization="GRANTED",
+                automation_authorization="GRANTED",
+                ai_authorization="GRANTED",
+                media_authorization="GRANTED",
+                symbol_scope_mode="BINANCE_USDM_ACTIVE_PERPETUAL",
+                gate_decision="MONITOR_ONLY",
+            )
+        )
+        session.add(
+            _channel_policy(
+                channel_id=2382278102,
+                topic_id=21,
+                label="邦妮區塊鏈-BTC ETH 即時更新",
+                channel_type="ANALYSIS",
+                access_authorization="GRANTED",
+                automation_authorization="GRANTED",
+                ai_authorization="GRANTED",
+                media_authorization="GRANTED",
+                symbol_scope_mode="STATIC_ALLOWLIST",
+                allowed_symbols=["BTCUSDT", "ETHUSDT"],
+                gate_decision="MONITOR_ONLY",
+            )
+        )
+
+    targets = [
+        TelegramChannelTarget(
+            channel_id=2439599598, topic_id=None, username="followgerry", label="A"
+        ),
+        TelegramChannelTarget(channel_id=2382278102, topic_id=21, username=None, label="B"),
+    ]
+    with factory() as session:
+        policies = load_channel_policies(session, targets)
+
+    assert evaluate_raw_collection(policies[(2439599598, 0)]).allowed is True
+    assert evaluate_raw_collection(policies[(2382278102, 21)]).allowed is True
+
+
+def test_load_channel_policies_returns_none_for_unregistered_target(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    targets = [TelegramChannelTarget(channel_id=999, topic_id=None, username=None, label="X")]
+
+    with factory() as session:
+        policies = load_channel_policies(session, targets)
+
+    assert policies == {}
+    assert evaluate_raw_collection(policies.get((999, 0))).allowed is False

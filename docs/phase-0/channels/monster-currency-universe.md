@@ -1,5 +1,7 @@
 # Channel Onboarding Record — Monster-貨幣宇宙中心
 
+**Sections 3, 4, and 6's enforced values now live in the `channel_policies` table** (row `channel_id=2439599598, topic_id=0`, seeded by `alembic/versions/0005_channel_policies.py`, read by `src/telegram_trader/channel_policy.py`). This document remains the human-readable justification, evidence, and fixture record. If this file and the table ever disagree, **the table governs runtime behavior** — correct this file to match. Note: Section 6 still shows "Gate 3 fixture set: NOT STARTED" — only 1 sample fixture exists for this channel, not the 20 needed before Gate 3 can be formally declared complete.
+
 ## 1. Record Status
 
 - **Record ID:** `CHANNEL-FOLLOWGERRY-001`

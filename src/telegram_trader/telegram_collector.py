@@ -11,6 +11,11 @@ from typing import Any, Protocol, cast
 from telethon import events  # type: ignore[import-untyped]
 from telethon.tl.types import PeerChannel  # type: ignore[import-untyped]
 
+from telegram_trader.channel_policy import (
+    ChannelPolicyError,
+    filter_authorized_targets,
+    load_channel_policies,
+)
 from telegram_trader.config import TelegramChannelTarget, get_settings
 from telegram_trader.db import create_db_engine, create_session_factory
 from telegram_trader.logging_config import configure_logging
@@ -286,16 +291,26 @@ async def _run(once: bool) -> int:
     settings = get_settings()
     configure_logging(settings.log_level)
     engine = create_db_engine(settings)
+    session_factory = create_session_factory(engine)
+
+    with session_factory() as session:
+        policies = load_channel_policies(session, settings.telegram_target_channels)
+    effective_targets = filter_authorized_targets(
+        settings.telegram_target_channels, policies, LOGGER
+    )
+    if not effective_targets:
+        raise ChannelPolicyError("no configured Telegram target is authorized for raw collection")
+
     client = create_client(settings)
     sink = TelegramMessageProcessor(
-        create_session_factory(engine),
+        session_factory,
         MediaStore(Path("media")),
-        frozenset(target.identity for target in settings.telegram_target_channels),
+        frozenset(target.identity for target in effective_targets),
     )
     collector = TelethonReadOnlyCollector(
         client,
         sink,
-        targets=settings.telegram_target_channels,
+        targets=effective_targets,
     )
     try:
         if once:

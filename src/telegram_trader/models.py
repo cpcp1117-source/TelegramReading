@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     Index,
@@ -195,4 +196,90 @@ class TelegramMessageVersion(Base):
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     audit_event_id: Mapped[str] = mapped_column(
         String(64), ForeignKey("audit_events.event_id"), nullable=False, unique=True
+    )
+
+
+class ChannelPolicy(Base):
+    """Enforced Channel Policy per (channel_id, topic_id); `topic_id=0` is the
+
+    "whole channel" sentinel, same convention as `TelegramCollectorCheckpoint`.
+    This table is the runtime source of truth; the per-channel onboarding
+    markdown under docs/phase-0/channels/ is the human-readable justification
+    and evidence record and must be corrected to match if the two disagree.
+    """
+
+    __tablename__ = "channel_policies"
+    __table_args__ = (
+        CheckConstraint("channel_id > 0", name="ck_channel_policy_channel_positive"),
+        CheckConstraint("topic_id >= 0", name="ck_channel_policy_topic_non_negative"),
+        CheckConstraint(
+            "channel_type IN ('ANALYSIS', 'EXECUTION_SIGNAL')",
+            name="ck_channel_policy_type_valid",
+        ),
+        CheckConstraint(
+            "access_authorization IN ('UNKNOWN', 'PENDING', 'GRANTED', 'REVOKED')",
+            name="ck_channel_policy_access_auth_valid",
+        ),
+        CheckConstraint(
+            "automation_authorization IN ('UNKNOWN', 'PENDING', 'GRANTED', 'REVOKED')",
+            name="ck_channel_policy_automation_auth_valid",
+        ),
+        CheckConstraint(
+            "ai_authorization IN ('UNKNOWN', 'PENDING', 'GRANTED', 'REVOKED')",
+            name="ck_channel_policy_ai_auth_valid",
+        ),
+        CheckConstraint(
+            "media_authorization IN ('UNKNOWN', 'PENDING', 'GRANTED', 'REVOKED')",
+            name="ck_channel_policy_media_auth_valid",
+        ),
+        CheckConstraint(
+            "symbol_scope_mode IN ('STATIC_ALLOWLIST', 'BINANCE_USDM_ACTIVE_PERPETUAL')",
+            name="ck_channel_policy_symbol_scope_valid",
+        ),
+        CheckConstraint(
+            "gate_decision IN ('MONITOR_ONLY', 'ENABLED', 'PAUSED', 'REJECTED')",
+            name="ck_channel_policy_gate_decision_valid",
+        ),
+        CheckConstraint("raw_retention_days > 0", name="ck_channel_policy_retention_positive"),
+    )
+
+    channel_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    topic_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, server_default="0")
+    label: Mapped[str] = mapped_column(String(200), nullable=False)
+    username: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    channel_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    access_authorization: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="UNKNOWN"
+    )
+    automation_authorization: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="UNKNOWN"
+    )
+    ai_authorization: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="UNKNOWN"
+    )
+    media_authorization: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="UNKNOWN"
+    )
+    symbol_scope_mode: Mapped[str] = mapped_column(String(30), nullable=False)
+    allowed_symbols: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default="[]")
+    prohibited_symbols: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, server_default="[]"
+    )
+    message_languages: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default="[]")
+    supported_content_types: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, server_default="[]"
+    )
+    raw_retention_days: Mapped[int] = mapped_column(Integer, nullable=False, server_default="7")
+    gate_decision: Mapped[str] = mapped_column(String(20), nullable=False)
+    policy_detail: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    onboarding_doc_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    acceptance_owner: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    acceptance_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
