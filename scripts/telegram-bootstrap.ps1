@@ -70,6 +70,10 @@ try {
 
     if ($Command -eq 'collect') {
         $env:POSTGRES_PASSWORD = $databasePasswordPlain
+        & docker compose --profile telegram build collector
+        if ($LASTEXITCODE -ne 0) {
+            throw "Collector image build failed with exit code $LASTEXITCODE"
+        }
         & docker compose --profile telegram run --rm collector alembic upgrade head
         if ($LASTEXITCODE -ne 0) {
             throw "Database migration failed with exit code $LASTEXITCODE"
