@@ -102,3 +102,16 @@ def filter_authorized_targets(
                 },
             )
     return authorized
+
+
+def resolve_effective_targets(
+    session: Session,
+    targets: list[TelegramChannelTarget],
+    logger: logging.Logger,
+) -> list[TelegramChannelTarget]:
+    """Load policies, filter to authorized targets, and fail closed if none remain."""
+    policies = load_channel_policies(session, targets)
+    effective = filter_authorized_targets(targets, policies, logger)
+    if not effective:
+        raise ChannelPolicyError("no configured Telegram target is authorized for raw collection")
+    return effective

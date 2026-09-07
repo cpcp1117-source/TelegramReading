@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import sys
 import uuid
@@ -14,7 +15,12 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session
 
 from telegram_trader import cli as cli_module
-from telegram_trader.channel_policy import evaluate_raw_collection, load_channel_policies
+from telegram_trader.channel_policy import (
+    ChannelPolicyError,
+    evaluate_raw_collection,
+    load_channel_policies,
+    resolve_effective_targets,
+)
 from telegram_trader.config import Settings, TelegramChannelTarget, get_settings
 from telegram_trader.db import create_db_engine, create_session_factory, database_is_ready
 from telegram_trader.mock_telegram import (
@@ -498,3 +504,44 @@ def test_load_channel_policies_returns_none_for_unregistered_target(engine: Engi
 
     assert policies == {}
     assert evaluate_raw_collection(policies.get((999, 0))).allowed is False
+
+
+def test_resolve_effective_targets_returns_only_authorized(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    with factory.begin() as session:
+        session.add(
+            _channel_policy(
+                channel_id=1,
+                topic_id=0,
+                automation_authorization="GRANTED",
+                gate_decision="MONITOR_ONLY",
+            )
+        )
+        session.add(
+            _channel_policy(
+                channel_id=2,
+                topic_id=0,
+                automation_authorization="GRANTED",
+                gate_decision="PAUSED",
+            )
+        )
+    targets = [
+        TelegramChannelTarget(channel_id=1, topic_id=None, username=None, label="Allowed"),
+        TelegramChannelTarget(channel_id=2, topic_id=None, username=None, label="Paused"),
+    ]
+
+    with factory() as session:
+        effective = resolve_effective_targets(session, targets, logging.getLogger("test"))
+
+    assert [target.label for target in effective] == ["Allowed"]
+
+
+def test_resolve_effective_targets_fails_closed_when_none_authorized(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    targets = [TelegramChannelTarget(channel_id=999, topic_id=None, username=None, label="X")]
+
+    with (
+        pytest.raises(ChannelPolicyError, match="no configured Telegram target is authorized"),
+        factory() as session,
+    ):
+        resolve_effective_targets(session, targets, logging.getLogger("test"))
