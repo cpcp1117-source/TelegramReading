@@ -64,21 +64,35 @@ Authorization records enable later Gate testing only. They do not authorize cred
 
 On 2026-09-03, the public Binance USDⓈ-M `exchangeInfo` response listed `CHIPUSDT` as `TRADING`, `PERPETUAL`, base asset `CHIP`, quote asset `USDT`. This is time-bound discovery evidence, not a permanent eligibility guarantee.
 
-## 5. Representative Fixture
+## 5. Representative Fixtures
 
-| Field | Value |
-|---|---|
-| Fixture ID | `MONSTER-001` |
-| Content type | `TEXT` |
-| User-provided anonymized content | `#CHIP 市價小多` |
-| Expected symbol alias | `CHIP` |
-| Expected canonical symbol | `CHIPUSDT`, only if a fresh eligible symbol snapshot confirms it |
-| Expected side | `LONG` |
-| Expected entry semantics | `MARKET` |
-| Expected SL behavior | `DEFAULT_ROE_30`; never invent an authored stop price |
-| Expected TP behavior | Missing; never synthesize TP |
-| Expected quantity behavior | No quantity inferred from `小` |
-| Phase 0 result | Specification fixture only; no parser or order exists |
+`MONSTER-001` is the original Phase 0 synthetic fixture, kept as-is. `MONSTER-002`–`MONSTER-021` are 20 real messages (`message_id` 6642–6662, 2026-09-02 to 2026-09-07) pulled via `telegram-bootstrap.ps1 preview` — read-only, no DB write, no media download. Three fixtures contained a third-party recruitment contact handle in the source text; that handle is **not reproduced** below (marked "redacted").
+
+This real sample turned out meaningfully more diverse than expected: it surfaces a **WAIT/no-trade-intent** case and an **ambiguous-side (leverage+entry given, no explicit LONG/SHORT wording)** case, and reveals that roughly half of this channel's traffic is pure promotional/recruitment content with a symbol hashtag but no actual trade signal — an important real characteristic for the Phase 4 parser to handle, not an edge case to special-case away. Still missing from this sample: an explicit **cancel** signal, an **invalid/wrong-side SL**, a **limit/range entry** (all observed entries were market), a **reply-based** SL move or partial TP, an **edited** message with a changed direction, a **duplicate** repost, a **stale** old-looking signal, and a **pure-image** signal with no caption text. Should any of these occur later, add them; otherwise they may need synthetic/anonymized examples before a Phase 4 parser can be considered fully edge-case tested.
+
+| Fixture ID | Type | Scenario | Expected Classification | Expected Fields / Result | Sensitive Data Removed |
+|---|---|---|---|---|---|
+| MONSTER-001 | Text | Clear LONG, market entry, small size (Phase 0 synthetic) | LONG / Market Entry | symbol_alias=CHIP; side=LONG; entry=MARKET; SL=`DEFAULT_ROE_30`; TP=none (no quantity inferred from `小`) | Yes (synthetic) |
+| MONSTER-002 | Text | Promotional, no symbol, celebratory (9/2) | No Trade Intent | no symbol/side/price present; pure marketing text | Yes |
+| MONSTER-003 | Text | Promotional, symbol hashtag only, after-the-fact profit brag (9/2) | No Trade Intent | symbol_alias=T mentioned but no side/entry/price | Yes |
+| MONSTER-004 | Text | Clear LONG, market entry, no SL/TP — same pattern as MONSTER-001 (9/3) | LONG / Market Entry | symbol_alias=CHIP; side=LONG（小多）; entry=MARKET; SL=`DEFAULT_ROE_30`; TP=none | Yes |
+| MONSTER-005 | Text | Promotional, no symbol (9/3) | No Trade Intent | no symbol/side/price | Yes |
+| MONSTER-006 | Text | Promotional, no symbol, recruitment message | No Trade Intent | contains a third-party contact handle — redacted from this record | Yes (redacted) |
+| MONSTER-007 | Caption | Promotional, symbol hashtag, profit brag (9/3) | No Trade Intent | symbol_alias=CHIP mentioned, no side/entry | Yes |
+| MONSTER-008 | Caption | Promotional, symbol hashtag, recruitment message (9/3) | No Trade Intent | contact handle redacted | Yes (redacted) |
+| MONSTER-009 | Caption | Promotional, symbol hashtag, profit brag (9/4) | No Trade Intent | symbol_alias=CHIP mentioned, no side/entry | Yes |
+| MONSTER-010 | Text | Analysis-style writeup ending in explicit wait recommendation (9/4) | No Trade Intent / WAIT | symbol_alias=BTC; explicit "建議觀望" (recommend wait-and-see); no side/entry/SL/TP | Yes |
+| MONSTER-011 | Text | Clear SHORT, market entry, "福利單" bonus-tier label, no SL/TP (9/4) | SHORT / Market Entry | symbol_alias=CHIP; side=SHORT; entry=MARKET; SL=`DEFAULT_ROE_30`; TP=none | Yes |
+| MONSTER-012 | Caption | Promotional, symbol hashtag, profit brag (9/4) | No Trade Intent | symbol_alias=CHIP mentioned, no side/entry | Yes |
+| MONSTER-013 | Text | Promotional, no symbol, recruitment message (9/4) | No Trade Intent | contact handle redacted | Yes (redacted) |
+| MONSTER-014 | Text | Clear SHORT, market entry with explicit price, no SL/TP (9/6) | SHORT / Market Entry | symbol_alias=ARB; side=SHORT; entry=MARKET @0.1950; SL=`DEFAULT_ROE_30`; TP=none | Yes |
+| MONSTER-015 | Text | Clear LONG, market entry, explicit author-specified SL and TP range (9/7) | LONG / Market Entry, complete | symbol_alias=UNI; side=LONG; entry=MARKET; TP=7.28–7.7; SL=6.83 (author-specified, not `DEFAULT_ROE_30`) | Yes |
+| MONSTER-016 | Text | Pure market-news, no symbol, not a signal (9/7) | No Trade Intent (non-signal news) | no symbol/side/price; informational only | Yes |
+| MONSTER-017 | Text | Leverage + market entry price given, but no explicit LONG/SHORT wording — direction only implied by emoji (9/7) | `INCOMPLETE` (side missing) | symbol_alias=ARB; leverage=50x; entry=MARKET @0.1686; side not stated in text | Yes |
+| MONSTER-018 | Text | Risk-flagged LONG, no explicit entry price (9/7) | LONG (risk-flagged) | symbol_alias=ICP; side=LONG（風險短多）; entry=MARKET (implied); SL=`DEFAULT_ROE_30`; TP=none | Yes |
+| MONSTER-019 | Caption | Promotional, symbol hashtag, "插針翻倍" wick-spike brag (9/7) | No Trade Intent | symbol_alias=ICP mentioned, no side/entry | Yes |
+| MONSTER-020 | Caption | Promotional, symbol hashtag, profit brag (9/7) | No Trade Intent | symbol_alias=ARB mentioned, no side/entry | Yes |
+| MONSTER-021 | Caption | Promotional, symbol hashtag, profit brag (9/7) | No Trade Intent | symbol_alias=ARB mentioned, no side/entry | Yes |
 
 ## 6. Onboarding Gate Status
 
@@ -90,7 +104,7 @@ On 2026-09-03, the public Binance USDⓈ-M `exchangeInfo` response listed `CHIPU
 | Symbol scope explicit | PASS | Dynamic, exchange-validated, fail-closed |
 | Gate 0 representative sample | PASS | One anonymized fixture |
 | Initial inventory scope | PASS | User confirmed this is the sole Phase 0 channel |
-| Gate 3 fixture set | NOT STARTED | Requires at least 20 fixtures before Gate 3 |
+| Gate 3 fixture set | PASS | 21 fixtures (1 synthetic + 20 real, pulled 2026-09-08 via `preview`); see §5 for the diversity gaps still worth closing before a Phase 4 parser is considered fully edge-case tested |
 | Runtime read-only access | PARTIAL | Dialog access confirmed; message collection and soak not yet tested |
 | Parser behavior | NOT TESTED | Prohibited until Phase 4 |
 

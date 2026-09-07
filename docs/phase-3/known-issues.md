@@ -5,7 +5,7 @@
 | Severity | Count | Items |
 |---|---:|---|
 | Critical | 0 | None |
-| Major | 4 | See below |
+| Major | 3 | See below (1 additional item, `@followgerry`'s fixture gap, was closed 2026-09-08 — see Resolved section) |
 | Minor | 2 | See below |
 
 No defect was found in the `channel_policies` schema, enforcement logic, or the multi-topic collector during this phase's testing. The items below are onboarding/completeness gaps and intentionally-deferred scope, not bugs in what was built.
@@ -14,10 +14,15 @@ No defect was found in the `channel_policies` schema, enforcement logic, or the 
 
 | ID | Item | Why it matters | Owner |
 |---|---|---|---|
-| P3-MAJOR-001 | `@followgerry` has only 1 of the required 20 fixtures ([monster-currency-universe.md](../phase-0/channels/monster-currency-universe.md) §6: "Gate 3 fixture set: NOT STARTED") | Gate 3 requires 20 representative fixtures per channel; this is the only channel-level requirement not met by either onboarded source | User |
 | P3-MAJOR-002 | No automated retention/deletion enforcement | `channel_policies.raw_retention_days=7` is declared for both channels but nothing in the codebase deletes data past that age — raw messages accumulate indefinitely today | Technical (future phase) |
 | P3-MAJOR-003 | No live/dynamic policy reload | A `gate_decision` change to `PAUSED`/`REJECTED`, or an authorization revocation, only takes effect on the collector's next restart — a running session keeps collecting under the policy state read at its own startup | Technical (future phase) |
 | P3-MAJOR-004 | AI-processing / media-storage authorization not enforced by any code | `ai_authorization`/`media_authorization` columns are captured and seeded `GRANTED` but nothing consumes them yet (no Phase 5 code exists) — flagging now so Phase 5 doesn't skip checking them when that code is written | Technical (Phase 5) |
+
+## Resolved
+
+| ID | Item | Resolution |
+|---|---|---|
+| P3-MAJOR-001 | `@followgerry` had only 1 of the required 20 fixtures | Closed 2026-09-08: 20 real messages pulled via `preview` and classified into [monster-currency-universe.md](../phase-0/channels/monster-currency-universe.md) §5 (21 fixtures total). The real sample surfaced a WAIT/no-trade-intent case, an ambiguous-side case, and revealed that roughly half this channel's traffic is promotional/no-signal content — all useful for Phase 4. Still missing from the real sample (flagged in that doc, not blocking): cancel signal, invalid/wrong-side SL, limit/range entry, reply-based updates, an edited message, a duplicate repost, a stale signal, and a pure-image-only signal. |
 
 ## Minor
 

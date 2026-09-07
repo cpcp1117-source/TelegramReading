@@ -23,7 +23,7 @@ What Phase 3 did **not** deliver: the actual normalization/parsing layer (Raw Me
 | `channel_policies` table + seed | Complete | migration 0005; both real channels' current declared values seeded |
 | Channel Policy enforcement at collector startup | Complete | `channel_policy.py`; wired into `telegram_collector.py::_run()`; per-target skip + loud log, hard fail only if zero targets remain |
 | Read-only onboarding CLI (`discover-private`, `preview`) | Complete | `telegram_cli.py`; never touches the DB or downloads media |
-| `@followgerry` onboarding | Partial | identity/authorization/market-policy recorded; **only 1 of 20 required fixtures exists** |
+| `@followgerry` onboarding | Complete | identity/authorization/market-policy recorded; 21 fixtures (1 synthetic + 20 real, added 2026-09-08 via `preview`) — diversity caveats noted in the doc |
 | Bonnie-blockchain BTC/ETH topic onboarding | Complete | [邦妮區塊鏈.md](../phase-0/channels/邦妮區塊鏈.md): A–E all filled, 20 real fixtures, Gate Decision `MONITOR_ONLY` |
 | Live production verification | Complete | both channels collecting via `docker compose --profile telegram run`, migration 0005 applied to the real database, 0 message loss/duplication observed |
 
@@ -58,10 +58,10 @@ Full detail in [test-evidence.md](test-evidence.md).
 ## 6. Open Items
 
 - Product Critical: 0.
-- Product Major: 4 (see [known-issues.md](known-issues.md)) — `@followgerry` fixture shortfall, no retention enforcement, no live policy reload, AI/media authorization not yet enforced anywhere.
+- Product Major: 3 (see [known-issues.md](known-issues.md)) — no retention enforcement, no live policy reload, AI/media authorization not yet enforced anywhere. (A 4th item, `@followgerry`'s fixture shortfall, was closed 2026-09-08.)
 - Phase 2's 5 inherited risk-accepted gaps remain open and now apply across both channels, not just one.
 - User acceptance has not been recorded.
 
 ## 7. Gate Decision
 
-`NOT READY`. Per [phase-kickoff.md](phase-kickoff.md), Phase 3's own dependency note ("Gate 3 前擴充至 20 fixtures") is only satisfied for one of the two onboarded channels. The registry/enforcement mechanism itself is built, tested, and live-verified — the gap is in onboarding completeness (`@followgerry` fixtures) and in features intentionally deferred to later phases (retention enforcement, live reload). See [gate-3-checklist.md](gate-3-checklist.md) for the itemized checklist and recommended path forward.
+`NOT READY`. Per [phase-kickoff.md](phase-kickoff.md), Phase 3's own dependency note ("Gate 3 前擴充至 20 fixtures") is now satisfied for both onboarded channels. The registry/enforcement mechanism itself is built, tested, and live-verified. The remaining gap is entirely in features intentionally deferred to later phases (retention enforcement, live policy reload, AI/media authorization enforcement with nothing yet to enforce against). See [gate-3-checklist.md](gate-3-checklist.md) for the itemized checklist and recommended path forward.
