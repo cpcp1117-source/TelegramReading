@@ -22,3 +22,4 @@ build/
 *.session-journal
 media/
 secrets/
+soak.log
