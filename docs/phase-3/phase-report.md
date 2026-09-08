@@ -5,9 +5,9 @@
 - **Date:** 2026-09-08
 - **Implementation Fixed Point:** `eea4f29`
 - **Branch:** `phase/2-telegram-readonly-collector` (unchanged from Phase 2; no separate Phase 3 branch was created)
-- **Gate Verdict:** `NOT READY` (see [gate-3-checklist.md](gate-3-checklist.md))
-- **User Acceptance:** `PENDING`
-- **Next Phase Permission:** `NOT GRANTED`
+- **Gate Verdict:** `READY` (see [gate-3-checklist.md](gate-3-checklist.md))
+- **User Acceptance:** `ACCEPTED` (2026-09-08)
+- **Next Phase Permission:** `GRANTED`
 
 ## 1. Outcome
 
@@ -59,10 +59,10 @@ Full detail in [test-evidence.md](test-evidence.md).
 ## 6. Open Items
 
 - Product Critical: 0.
-- Product Major: 1 (see [known-issues.md](known-issues.md)) — AI/media authorization has nothing to enforce against until Phase 5 exists. (The other 3 — fixture shortfall, retention, live reload — were closed 2026-09-08.)
-- Phase 2's 5 inherited risk-accepted gaps remain open and now apply across both channels, not just one.
-- User acceptance has not been recorded.
+- Product Major: 0. All 4 original Major items are closed or reclassified as of 2026-09-08. The fixture shortfall, retention, and live reload were closed by code. AI/media authorization (P3-MAJOR-004) could not be built in Phase 3 (no Phase 5 code exists to enforce against) and was reclassified as structurally deferred, per the user's explicit decision — see [gate-3-checklist.md](gate-3-checklist.md) User Acceptance Record. It converts into a mandatory Phase 5 Definition-of-Done item.
+- Phase 2's 5 inherited risk-accepted gaps remain open and now apply across both channels, not just one; carried forward unchanged by this acceptance.
+- User acceptance recorded 2026-09-08.
 
 ## 7. Gate Decision
 
-`NOT READY`. Per [phase-kickoff.md](phase-kickoff.md), Phase 3's own dependency note ("Gate 3 前擴充至 20 fixtures") is now satisfied for both onboarded channels. The registry/enforcement mechanism, retention, and live policy reload are all built, tested, and verified (retention/live-reload on disposable Postgres; not yet run against the real database). The one remaining Major item (AI/media authorization enforcement) cannot actually be closed by Phase 3 — there's no Phase 5 code yet to enforce against. See [gate-3-checklist.md](gate-3-checklist.md) for the itemized checklist and the two honest options for how to record that.
+`READY`. Per [phase-kickoff.md](phase-kickoff.md), Phase 3's own dependency note ("Gate 3 前擴充至 20 fixtures") is now satisfied for both onboarded channels. The registry/enforcement mechanism, retention, and live policy reload are all built, tested, and verified (retention/live-reload on disposable Postgres; not yet run against the real database). The one remaining item (AI/media authorization enforcement) cannot actually be closed by Phase 3 — there's no Phase 5 code yet to enforce against — and the user explicitly chose to record it as structurally deferred rather than an open gap. See [gate-3-checklist.md](gate-3-checklist.md) for the full User Acceptance Record.
