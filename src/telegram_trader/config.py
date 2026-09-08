@@ -76,6 +76,13 @@ class Settings(BaseSettings):
         ],
         validation_alias=AliasChoices("TELEGRAM_TARGET_CHANNELS", "APP_TELEGRAM_TARGET_CHANNELS"),
     )
+    policy_poll_interval_seconds: float = Field(
+        default=300.0,
+        gt=0,
+        validation_alias=AliasChoices(
+            "POLICY_POLL_INTERVAL_SECONDS", "APP_POLICY_POLL_INTERVAL_SECONDS"
+        ),
+    )
 
     @field_validator("database_url")
     @classmethod

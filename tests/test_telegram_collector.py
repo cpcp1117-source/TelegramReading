@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -260,6 +262,107 @@ async def test_connection_removes_handlers_after_disconnect_error() -> None:
 
     assert client.started is True
     assert client.handlers == []
+
+
+def test_apply_policy_reload_shrinks_but_never_grows() -> None:
+    collector = TelethonReadOnlyCollector(
+        FakeClient(), FakeSink(), targets=[FOLLOWGERRY_TARGET, BTC_ETH_TOPIC_TARGET]
+    )
+
+    removed = collector._apply_policy_reload(frozenset({FOLLOWGERRY_TARGET.identity}))
+
+    assert [target.label for target in removed] == [BTC_ETH_TOPIC_TARGET.label]
+    assert collector._targets == [FOLLOWGERRY_TARGET]
+
+
+def test_apply_policy_reload_ignores_targets_not_already_active() -> None:
+    collector = TelethonReadOnlyCollector(FakeClient(), FakeSink(), targets=[FOLLOWGERRY_TARGET])
+
+    removed = collector._apply_policy_reload(
+        frozenset({FOLLOWGERRY_TARGET.identity, BTC_ETH_TOPIC_TARGET.identity})
+    )
+
+    assert removed == []
+    assert collector._targets == [FOLLOWGERRY_TARGET]
+
+
+def test_apply_policy_reload_no_change_returns_empty() -> None:
+    collector = TelethonReadOnlyCollector(FakeClient(), FakeSink(), targets=[FOLLOWGERRY_TARGET])
+
+    removed = collector._apply_policy_reload(frozenset({FOLLOWGERRY_TARGET.identity}))
+
+    assert removed == []
+    assert collector._targets == [FOLLOWGERRY_TARGET]
+
+
+@pytest.mark.anyio
+async def test_poll_policy_forever_retries_after_unexpected_error() -> None:
+    collector = TelethonReadOnlyCollector(FakeClient(), FakeSink(), targets=[FOLLOWGERRY_TARGET])
+    calls = 0
+
+    async def flaky_reload(
+        _session_factory: object, _full_targets: object
+    ) -> list[TelegramChannelTarget]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("simulated transient failure")
+        return []
+
+    collector.reload_policy_once = flaky_reload  # type: ignore[method-assign,assignment]
+    task = asyncio.create_task(
+        collector._poll_policy_forever(
+            object(),  # type: ignore[arg-type]
+            [FOLLOWGERRY_TARGET],
+            interval_seconds=0.01,
+        )
+    )
+    # reconnect_delay(0) == 1 second, so the retry after the first failure needs
+    # over a second before the second call happens.
+    for _ in range(200):
+        if calls >= 2:
+            break
+        await asyncio.sleep(0.02)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    assert calls >= 2
+
+
+@pytest.mark.anyio
+async def test_run_forever_cancels_policy_poll_task_on_shutdown() -> None:
+    client = FakeClient()
+    client.raise_on_run = True
+    collector = TelethonReadOnlyCollector(client, FakeSink(), targets=[FOLLOWGERRY_TARGET])
+    poll_calls = 0
+
+    async def counting_reload(
+        _session_factory: object, _full_targets: object
+    ) -> list[TelegramChannelTarget]:
+        nonlocal poll_calls
+        poll_calls += 1
+        return []
+
+    collector.reload_policy_once = counting_reload  # type: ignore[method-assign,assignment]
+    before = asyncio.all_tasks()
+    task = asyncio.create_task(
+        collector.run_forever(
+            policy_session_factory=object(),  # type: ignore[arg-type]
+            policy_full_targets=[FOLLOWGERRY_TARGET],
+            policy_poll_interval_seconds=0.01,
+        )
+    )
+    for _ in range(50):
+        if poll_calls >= 1:
+            break
+        await asyncio.sleep(0.01)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    assert poll_calls >= 1
+    assert asyncio.all_tasks() - before == set()
 
 
 def test_reconnect_delay_is_exponential_and_capped() -> None:

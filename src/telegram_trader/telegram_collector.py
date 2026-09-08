@@ -2,16 +2,22 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import logging
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol, cast
 
+from sqlalchemy.orm import Session, sessionmaker
 from telethon import events  # type: ignore[import-untyped]
 from telethon.tl.types import PeerChannel  # type: ignore[import-untyped]
 
-from telegram_trader.channel_policy import resolve_effective_targets
+from telegram_trader.channel_policy import (
+    filter_authorized_targets,
+    load_channel_policies,
+    resolve_effective_targets,
+)
 from telegram_trader.config import TelegramChannelTarget, get_settings
 from telegram_trader.db import create_db_engine, create_session_factory
 from telegram_trader.logging_config import configure_logging
@@ -254,27 +260,110 @@ class TelethonReadOnlyCollector:
             self._client.remove_event_handler(on_new, new_builder)
             self._client.remove_event_handler(on_edit, edit_builder)
 
-    async def run_forever(self) -> None:
+    def _apply_policy_reload(
+        self, authorized: frozenset[tuple[int, int | None]]
+    ) -> list[TelegramChannelTarget]:
+        """Shrink `self._targets` to those still authorized; never adds one back.
+
+        A newly-authorized target still needs a restart (fresh entity
+        resolution + backfill), which is out of scope here by design.
+        """
+        removed = [target for target in self._targets if target.identity not in authorized]
+        if removed:
+            self._targets = [target for target in self._targets if target.identity in authorized]
+        return removed
+
+    async def reload_policy_once(
+        self,
+        session_factory: sessionmaker[Session],
+        full_targets: Sequence[TelegramChannelTarget],
+    ) -> list[TelegramChannelTarget]:
+        """Re-evaluate Channel Policy against the original full target list and
+
+        shrink the active target set accordingly. Raises nothing on its own;
+        the poll loop is responsible for catching and retrying a DB error.
+        """
+        with session_factory() as session:
+            policies = load_channel_policies(session, list(full_targets))
+        authorized = filter_authorized_targets(list(full_targets), policies, LOGGER)
+        removed = self._apply_policy_reload(frozenset(target.identity for target in authorized))
+        for target in removed:
+            LOGGER.warning(
+                "channel policy revoked target mid-session; excluding without restart",
+                extra={
+                    "context": {
+                        "channel_id": target.channel_id,
+                        "topic_id": target.topic_id,
+                        "label": target.label,
+                    }
+                },
+            )
+        return removed
+
+    async def _poll_policy_forever(
+        self,
+        session_factory: sessionmaker[Session],
+        full_targets: Sequence[TelegramChannelTarget],
+        interval_seconds: float,
+    ) -> None:
+        full_targets = list(full_targets)
         attempt = 0
         while True:
+            await asyncio.sleep(interval_seconds)
             try:
-                await self.run_connection()
+                await self.reload_policy_once(session_factory, full_targets)
                 attempt = 0
             except asyncio.CancelledError:
                 raise
-            except Exception as error:
+            except Exception:
                 delay = reconnect_delay(attempt)
-                LOGGER.warning(
-                    "telegram collector disconnected; retrying",
-                    extra={
-                        "context": {
-                            "error_type": type(error).__name__,
-                            "retry_seconds": delay,
-                        }
-                    },
+                LOGGER.exception(
+                    "channel policy poll failed unexpectedly; retrying",
+                    extra={"context": {"retry_seconds": delay}},
                 )
                 attempt += 1
                 await asyncio.sleep(delay)
+
+    async def run_forever(
+        self,
+        *,
+        policy_session_factory: sessionmaker[Session] | None = None,
+        policy_full_targets: Sequence[TelegramChannelTarget] | None = None,
+        policy_poll_interval_seconds: float = 300.0,
+    ) -> None:
+        poll_task: asyncio.Task[None] | None = None
+        if policy_session_factory is not None and policy_full_targets:
+            poll_task = asyncio.create_task(
+                self._poll_policy_forever(
+                    policy_session_factory, policy_full_targets, policy_poll_interval_seconds
+                )
+            )
+        try:
+            attempt = 0
+            while True:
+                try:
+                    await self.run_connection()
+                    attempt = 0
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    delay = reconnect_delay(attempt)
+                    LOGGER.warning(
+                        "telegram collector disconnected; retrying",
+                        extra={
+                            "context": {
+                                "error_type": type(error).__name__,
+                                "retry_seconds": delay,
+                            }
+                        },
+                    )
+                    attempt += 1
+                    await asyncio.sleep(delay)
+        finally:
+            if poll_task is not None:
+                poll_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await poll_task
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -309,7 +398,11 @@ async def _run(once: bool) -> int:
         if once:
             await collector.run_connection()
         else:
-            await collector.run_forever()
+            await collector.run_forever(
+                policy_session_factory=session_factory,
+                policy_full_targets=settings.telegram_target_channels,
+                policy_poll_interval_seconds=settings.policy_poll_interval_seconds,
+            )
         return 0
     finally:
         await client.disconnect()

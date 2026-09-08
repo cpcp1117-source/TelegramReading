@@ -59,6 +59,25 @@ def test_media_store_hashes_and_uses_safe_extension(tmp_path: Path) -> None:
     assert (tmp_path / stored.relative_path).read_bytes() == content
 
 
+def test_media_store_delete_removes_file_and_empty_parents(tmp_path: Path) -> None:
+    stored = MediaStore(tmp_path).store(
+        channel_id=2439599598,
+        message_id=100,
+        edit_version=0,
+        content=b"synthetic-image-bytes",
+        filename="chart.png",
+    )
+
+    MediaStore(tmp_path).delete(stored.relative_path)
+
+    assert not (tmp_path / stored.relative_path).exists()
+    assert not (tmp_path / str(2439599598)).exists()
+
+
+def test_media_store_delete_is_a_noop_for_missing_file(tmp_path: Path) -> None:
+    MediaStore(tmp_path).delete("2439599598/100/0-missing.png")
+
+
 def test_message_rejects_naive_timestamp() -> None:
     with pytest.raises(ValueError, match="timezone-aware"):
         message(source_date=datetime(2026, 9, 6, 8, 0))

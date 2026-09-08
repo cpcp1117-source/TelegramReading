@@ -6,7 +6,7 @@ import os
 import sys
 import uuid
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -39,6 +39,8 @@ from telegram_trader.models import (
     TelegramMessageVersion,
 )
 from telegram_trader.outbox import OutboxConsumer
+from telegram_trader.retention_cleanup import run_retention_cleanup
+from telegram_trader.telegram_collector import TelethonReadOnlyCollector
 from telegram_trader.telegram_storage import (
     MediaStore,
     TelegramMessageInput,
@@ -545,3 +547,192 @@ def test_resolve_effective_targets_fails_closed_when_none_authorized(engine: Eng
         factory() as session,
     ):
         resolve_effective_targets(session, targets, logging.getLogger("test"))
+
+
+def test_retention_cleanup_deletes_only_rows_past_declared_retention(
+    engine: Engine, tmp_path: Path
+) -> None:
+    factory = create_session_factory(engine)
+    media_root = tmp_path / "media"
+    processor = TelegramMessageProcessor(factory, MediaStore(media_root), frozenset({(555, None)}))
+    now = datetime(2026, 9, 8, 0, 0, tzinfo=UTC)
+    with factory.begin() as session:
+        session.add(_channel_policy(channel_id=555, topic_id=0, raw_retention_days=1))
+
+    old_result = processor.process(
+        _telegram_input(
+            channel_id=555,
+            message_id=1,
+            received_at=now - timedelta(days=2),
+            content_type="image",
+            media_bytes=b"old-chart",
+            media_filename="old.png",
+        )
+    )
+    processor.process(
+        _telegram_input(
+            channel_id=555,
+            message_id=2,
+            received_at=now,
+            content_type="image",
+            media_bytes=b"new-chart",
+            media_filename="new.png",
+        )
+    )
+
+    results = run_retention_cleanup(factory, MediaStore(media_root), now=lambda: now)
+
+    assert len(results) == 1
+    assert results[0].deleted_row_count == 1
+    assert results[0].deleted_media_count == 1
+    with factory() as session:
+        remaining = list(session.scalars(select(TelegramMessageVersion)))
+        assert [version.message_id for version in remaining] == [2]
+        checkpoint = session.get(TelegramCollectorCheckpoint, (555, 0))
+        assert checkpoint is not None
+        assert checkpoint.last_message_id == 2
+    assert old_result.media_sha256 is not None
+    assert not (media_root / "555" / "1").exists()
+    assert (media_root / "555" / "2").exists()
+
+
+def test_retention_cleanup_respects_topic_scope(engine: Engine, tmp_path: Path) -> None:
+    factory = create_session_factory(engine)
+    media_root = tmp_path / "media"
+    processor = TelegramMessageProcessor(
+        factory, MediaStore(media_root), frozenset({(556, None), (556, 21)})
+    )
+    now = datetime(2026, 9, 8, 0, 0, tzinfo=UTC)
+    old = now - timedelta(days=10)
+    with factory.begin() as session:
+        session.add(_channel_policy(channel_id=556, topic_id=0, raw_retention_days=1))
+        session.add(_channel_policy(channel_id=556, topic_id=21, raw_retention_days=100))
+
+    processor.process(_telegram_input(channel_id=556, topic_id=None, message_id=1, received_at=old))
+    processor.process(_telegram_input(channel_id=556, topic_id=21, message_id=2, received_at=old))
+
+    run_retention_cleanup(factory, MediaStore(media_root), now=lambda: now)
+
+    with factory() as session:
+        remaining = {
+            version.topic_id for version in session.scalars(select(TelegramMessageVersion))
+        }
+        assert remaining == {21}
+
+
+def test_retention_cleanup_processes_all_rows_across_batches(
+    engine: Engine, tmp_path: Path
+) -> None:
+    factory = create_session_factory(engine)
+    media_root = tmp_path / "media"
+    processor = TelegramMessageProcessor(factory, MediaStore(media_root), frozenset({(557, None)}))
+    now = datetime(2026, 9, 8, 0, 0, tzinfo=UTC)
+    with factory.begin() as session:
+        session.add(_channel_policy(channel_id=557, topic_id=0, raw_retention_days=1))
+    for message_id in range(1, 4):
+        processor.process(
+            _telegram_input(
+                channel_id=557, message_id=message_id, received_at=now - timedelta(days=5)
+            )
+        )
+
+    results = run_retention_cleanup(factory, MediaStore(media_root), now=lambda: now, batch_size=1)
+
+    assert results[0].deleted_row_count == 3
+    with factory() as session:
+        assert session.scalar(select(func.count()).select_from(TelegramMessageVersion)) == 0
+
+
+def test_retention_trigger_rejects_delete_of_non_expired_row(
+    engine: Engine, tmp_path: Path
+) -> None:
+    factory = create_session_factory(engine)
+    media_root = tmp_path / "media"
+    processor = TelegramMessageProcessor(factory, MediaStore(media_root), frozenset({(558, None)}))
+    now = datetime(2026, 9, 8, 0, 0, tzinfo=UTC)
+    with factory.begin() as session:
+        session.add(_channel_policy(channel_id=558, topic_id=0, raw_retention_days=100))
+    processor.process(_telegram_input(channel_id=558, message_id=1, received_at=now))
+
+    with (
+        engine.connect() as connection,
+        pytest.raises(DBAPIError, match="append-only"),
+        connection.begin(),
+    ):
+        connection.execute(text("SET LOCAL app.retention_cleanup = 'on'"))
+        connection.execute(text("DELETE FROM telegram_message_versions WHERE channel_id = 558"))
+
+
+def test_retention_trigger_allows_delete_of_expired_row_with_guc_set(
+    engine: Engine, tmp_path: Path
+) -> None:
+    factory = create_session_factory(engine)
+    media_root = tmp_path / "media"
+    processor = TelegramMessageProcessor(factory, MediaStore(media_root), frozenset({(559, None)}))
+    now = datetime(2026, 9, 8, 0, 0, tzinfo=UTC)
+    with factory.begin() as session:
+        session.add(_channel_policy(channel_id=559, topic_id=0, raw_retention_days=1))
+    processor.process(
+        _telegram_input(channel_id=559, message_id=1, received_at=now - timedelta(days=5))
+    )
+
+    with engine.connect() as connection, connection.begin():
+        connection.execute(text("SET LOCAL app.retention_cleanup = 'on'"))
+        connection.execute(text("DELETE FROM telegram_message_versions WHERE channel_id = 559"))
+
+    with factory() as session:
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(TelegramMessageVersion)
+                .where(TelegramMessageVersion.channel_id == 559)
+            )
+            == 0
+        )
+
+
+@pytest.mark.anyio
+async def test_reload_policy_once_removes_target_when_paused(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    target = TelegramChannelTarget(channel_id=560, topic_id=None, username=None, label="Live")
+    with factory.begin() as session:
+        session.add(
+            _channel_policy(
+                channel_id=560,
+                topic_id=0,
+                automation_authorization="GRANTED",
+                gate_decision="ENABLED",
+            )
+        )
+    collector = TelethonReadOnlyCollector(object(), object(), targets=[target])  # type: ignore[arg-type]
+
+    with factory.begin() as session:
+        session.execute(
+            text("UPDATE channel_policies SET gate_decision = 'PAUSED' WHERE channel_id = 560")
+        )
+
+    removed = await collector.reload_policy_once(factory, [target])
+
+    assert [t.label for t in removed] == ["Live"]
+    assert collector._matching_target(560, None) is None
+
+
+@pytest.mark.anyio
+async def test_reload_policy_once_leaves_enabled_target_unaffected(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    target = TelegramChannelTarget(channel_id=561, topic_id=None, username=None, label="Live")
+    with factory.begin() as session:
+        session.add(
+            _channel_policy(
+                channel_id=561,
+                topic_id=0,
+                automation_authorization="GRANTED",
+                gate_decision="ENABLED",
+            )
+        )
+    collector = TelethonReadOnlyCollector(object(), object(), targets=[target])  # type: ignore[arg-type]
+
+    removed = await collector.reload_policy_once(factory, [target])
+
+    assert removed == []
+    assert collector._matching_target(561, None) is target

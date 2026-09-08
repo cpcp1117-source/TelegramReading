@@ -102,6 +102,16 @@ class MediaStore:
                     temporary_path.unlink()
         return StoredMedia(digest, relative.as_posix(), len(content))
 
+    def delete(self, relative_path: str) -> None:
+        """Best-effort removal of one stored file plus its now-possibly-empty parents."""
+        path = self._root / relative_path
+        path.unlink(missing_ok=True)
+        for parent in (path.parent, path.parent.parent):
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+
 
 @dataclass(frozen=True, slots=True)
 class TelegramPersistResult:
