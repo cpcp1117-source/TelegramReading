@@ -25,6 +25,7 @@ COPY --from=runtime-builder /app/.venv /app/.venv
 COPY --from=runtime-builder /app/alembic.ini ./alembic.ini
 COPY --from=runtime-builder /app/alembic ./alembic
 COPY --from=runtime-builder /app/fixtures ./fixtures
+COPY scripts ./scripts
 RUN /usr/local/bin/python -m pip uninstall --yes setuptools wheel && \
     addgroup --system app && \
     adduser --system --ingroup app app
