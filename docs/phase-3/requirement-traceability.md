@@ -1,7 +1,7 @@
 # Phase 3 Requirement Traceability
 
 - **Source:** [system-spec.md](../phase-0/system-spec.md) FR-002/FR-005/FR-008/BR-001, [phase-kickoff.md](phase-kickoff.md) In Scope list
-- **Fixed Point:** `9039cac9f5fdb1dfbaea68a26780bf4f96ccc813`
+- **Fixed Point:** `eea4f29`
 
 | ID | Requirement | Implementation | Verification | Status |
 |---|---|---|---|---|
@@ -14,7 +14,8 @@
 | P3-REQ-007 | Forum-topic scoping: one Source Channel entry may be a specific topic within a group, not just a whole channel | `TelegramChannelTarget.topic_id`, migration 0004, `reply_to`-scoped backfill/filter | live verification: bonnie-blockchain topic 21 collects independently of other topics in the same group | PASS |
 | P3-REQ-008 | Symbol scope mode declared per channel (`STATIC_ALLOWLIST` / `BINANCE_USDM_ACTIVE_PERPETUAL`) | `channel_policies.symbol_scope_mode` + `allowed_symbols`/`prohibited_symbols` | seeded and queryable; **not yet enforced by any parser** (no parser exists) | PARTIAL — data captured, enforcement is Phase 4 scope |
 | P3-REQ-009 (FR-008) | AI processing / media-storage authorization blocks corresponding processing path | `ai_authorization`/`media_authorization` columns exist and are seeded `GRANTED` | **N/A — no AI processing or media-storage-consuming code exists yet to check them against** (Phase 5 scope) | N/A, not PASS |
-| P3-REQ-010 | Retention policy declared per channel | `raw_retention_days` column, both seeded at 7 days | column exists and is queryable | PARTIAL — declared only, no deletion job exists |
+| P3-REQ-010 | Retention policy declared and enforced per channel | `raw_retention_days` column (both seeded at 7 days); migration 0006 age-gated trigger bypass; `retention_cleanup.py`/`scripts/retention_cleanup.py` | trigger-strength regression test (rejects non-expired, allows expired-with-GUC); batch/topic-scope/media-deletion integration tests | PASS (disposable Postgres; not yet run against the real database) |
+| P3-REQ-013 | A revoked/paused Channel Policy stops collection without a process restart | `TelethonReadOnlyCollector.reload_policy_once`/`_poll_policy_forever`, `run_forever()` polling task | unit tests (shrink-only semantics, retry-on-error, clean task cancellation); integration test flips a real row to `PAUSED` and confirms exclusion | PASS (shrink-only scope; adding a newly-authorized target still needs a restart, by design) |
 | P3-REQ-011 | 20 representative fixtures per channel before Gate 3 | bonnie-blockchain: 20 real fixtures in [邦妮區塊鏈.md](../phase-0/channels/邦妮區塊鏈.md); `@followgerry`: 21 fixtures (1 synthetic + 20 real, added 2026-09-08) in [monster-currency-universe.md](../phase-0/channels/monster-currency-universe.md) | both onboarding docs reviewed; diversity caveats documented in each | PASS for both |
 | P3-REQ-012 | Markdown onboarding record and enforced table must not silently diverge | banner added to all 3 onboarding docs declaring the table authoritative | manual review; values cross-checked at migration authoring time | PASS |
 
