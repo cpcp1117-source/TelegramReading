@@ -38,6 +38,8 @@ from telegram_trader.models import (
     TelegramCollectorCheckpoint,
     TelegramMessageVersion,
 )
+from telegram_trader.models import NormalizedContent as NormalizedContentRow
+from telegram_trader.normalize_content import NormalizationResult, run_normalization
 from telegram_trader.outbox import OutboxConsumer
 from telegram_trader.retention_cleanup import run_retention_cleanup
 from telegram_trader.telegram_collector import TelethonReadOnlyCollector
@@ -59,7 +61,7 @@ def engine() -> Iterator[Engine]:
         connection.execute(
             text(
                 "TRUNCATE TABLE outbox_delivery_receipts, outbox_events, "
-                "telegram_message_versions, telegram_collector_checkpoints, "
+                "normalized_content, telegram_message_versions, telegram_collector_checkpoints, "
                 "mock_message_receipts, consumer_checkpoints, audit_events, "
                 "channel_policies "
                 "RESTART IDENTITY CASCADE"
@@ -736,3 +738,200 @@ async def test_reload_policy_once_leaves_enabled_target_unaffected(engine: Engin
 
     assert removed == []
     assert collector._matching_target(561, None) is target
+
+
+def test_run_normalization_resolves_static_allowlist_symbols(
+    engine: Engine, tmp_path: Path
+) -> None:
+    factory = create_session_factory(engine)
+    processor = TelegramMessageProcessor(
+        factory, MediaStore(tmp_path / "media"), frozenset({(600, None)})
+    )
+    with factory.begin() as session:
+        session.add(
+            _channel_policy(
+                channel_id=600,
+                topic_id=0,
+                symbol_scope_mode="STATIC_ALLOWLIST",
+                allowed_symbols=["BTCUSDT"],
+                automation_authorization="GRANTED",
+                gate_decision="ENABLED",
+            )
+        )
+    processor.process(
+        _telegram_input(channel_id=600, message_id=1, text="Long BTCUSDT, avoid DOGEUSDT")
+    )
+
+    results = run_normalization(factory)
+
+    assert results == [NormalizationResult(channel_id=600, topic_id=0, processed_count=1)]
+    with factory() as session:
+        row = session.scalar(select(NormalizedContentRow))
+        assert row is not None
+        assert row.symbol_scope_mode == "STATIC_ALLOWLIST"
+        assert sorted(row.symbol_candidates) == ["BTCUSDT", "DOGEUSDT"]
+        resolved = {item["symbol"]: item["status"] for item in row.resolved_symbols}
+        assert resolved == {"BTCUSDT": "VALID", "DOGEUSDT": "INVALID"}
+        assert row.media_review_status == "NOT_APPLICABLE"
+
+
+def test_run_normalization_marks_binance_dynamic_scope_pending(
+    engine: Engine, tmp_path: Path
+) -> None:
+    factory = create_session_factory(engine)
+    processor = TelegramMessageProcessor(
+        factory, MediaStore(tmp_path / "media"), frozenset({(601, None)})
+    )
+    with factory.begin() as session:
+        session.add(
+            _channel_policy(
+                channel_id=601,
+                topic_id=0,
+                symbol_scope_mode="BINANCE_USDM_ACTIVE_PERPETUAL",
+                automation_authorization="GRANTED",
+                gate_decision="MONITOR_ONLY",
+            )
+        )
+    processor.process(_telegram_input(channel_id=601, message_id=1, text="Long BTCUSDT now"))
+
+    run_normalization(factory)
+
+    with factory() as session:
+        row = session.scalar(select(NormalizedContentRow))
+        assert row is not None
+        resolved = {item["symbol"]: item["status"] for item in row.resolved_symbols}
+        assert resolved == {"BTCUSDT": "PENDING_MARKET_DATA"}
+
+
+def test_run_normalization_is_idempotent(engine: Engine, tmp_path: Path) -> None:
+    factory = create_session_factory(engine)
+    processor = TelegramMessageProcessor(
+        factory, MediaStore(tmp_path / "media"), frozenset({(602, None)})
+    )
+    with factory.begin() as session:
+        session.add(_channel_policy(channel_id=602, topic_id=0, automation_authorization="GRANTED"))
+    processor.process(_telegram_input(channel_id=602, message_id=1, text="hello"))
+
+    first = run_normalization(factory)
+    second = run_normalization(factory)
+
+    assert first[0].processed_count == 1
+    assert second[0].processed_count == 0
+    with factory() as session:
+        assert session.scalar(select(func.count()).select_from(NormalizedContentRow)) == 1
+
+
+def test_run_normalization_version_bump_appends_new_row(engine: Engine, tmp_path: Path) -> None:
+    factory = create_session_factory(engine)
+    processor = TelegramMessageProcessor(
+        factory, MediaStore(tmp_path / "media"), frozenset({(603, None)})
+    )
+    with factory.begin() as session:
+        session.add(_channel_policy(channel_id=603, topic_id=0, automation_authorization="GRANTED"))
+    processor.process(_telegram_input(channel_id=603, message_id=1, text="hello"))
+
+    run_normalization(factory, version="v1")
+    run_normalization(factory, version="v2")
+
+    with factory() as session:
+        versions = sorted(
+            row.normalizer_version for row in session.scalars(select(NormalizedContentRow))
+        )
+        assert versions == ["v1", "v2"]
+
+
+def test_normalized_content_cannot_be_updated(engine: Engine, tmp_path: Path) -> None:
+    factory = create_session_factory(engine)
+    processor = TelegramMessageProcessor(
+        factory, MediaStore(tmp_path / "media"), frozenset({(604, None)})
+    )
+    with factory.begin() as session:
+        session.add(_channel_policy(channel_id=604, topic_id=0, automation_authorization="GRANTED"))
+    processor.process(_telegram_input(channel_id=604, message_id=1, text="hello"))
+    run_normalization(factory)
+
+    with engine.connect() as connection, pytest.raises(DBAPIError, match="append-only"):
+        connection.execute(text("UPDATE normalized_content SET normalized_text='changed'"))
+
+
+def test_normalized_content_is_deleted_when_raw_row_is_purged(
+    engine: Engine, tmp_path: Path
+) -> None:
+    factory = create_session_factory(engine)
+    media_root = tmp_path / "media"
+    processor = TelegramMessageProcessor(factory, MediaStore(media_root), frozenset({(605, None)}))
+    now = datetime(2026, 9, 8, 0, 0, tzinfo=UTC)
+    with factory.begin() as session:
+        session.add(
+            _channel_policy(
+                channel_id=605, topic_id=0, raw_retention_days=1, automation_authorization="GRANTED"
+            )
+        )
+    processor.process(
+        _telegram_input(
+            channel_id=605, message_id=1, received_at=now - timedelta(days=5), text="hello"
+        )
+    )
+    run_normalization(factory)
+    with factory() as session:
+        assert session.scalar(select(func.count()).select_from(NormalizedContentRow)) == 1
+
+    run_retention_cleanup(factory, MediaStore(media_root), now=lambda: now)
+
+    with factory() as session:
+        assert session.scalar(select(func.count()).select_from(NormalizedContentRow)) == 0
+
+
+def test_run_normalization_flags_media_for_manual_review(engine: Engine, tmp_path: Path) -> None:
+    factory = create_session_factory(engine)
+    processor = TelegramMessageProcessor(
+        factory, MediaStore(tmp_path / "media"), frozenset({(606, None)})
+    )
+    with factory.begin() as session:
+        session.add(_channel_policy(channel_id=606, topic_id=0, automation_authorization="GRANTED"))
+    processor.process(
+        _telegram_input(
+            channel_id=606,
+            message_id=1,
+            content_type="image",
+            media_bytes=b"chart-bytes",
+            media_filename="chart.png",
+        )
+    )
+
+    run_normalization(factory)
+
+    with factory() as session:
+        row = session.scalar(select(NormalizedContentRow))
+        assert row is not None
+        assert row.media_review_status == "PENDING_MANUAL_REVIEW"
+        assert row.normalized_text == ""
+
+
+def test_run_normalization_skips_target_with_revoked_authorization(
+    engine: Engine, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    factory = create_session_factory(engine)
+    processor = TelegramMessageProcessor(
+        factory, MediaStore(tmp_path / "media"), frozenset({(607, None)})
+    )
+    with factory.begin() as session:
+        session.add(
+            _channel_policy(
+                channel_id=607,
+                topic_id=0,
+                automation_authorization="GRANTED",
+                gate_decision="PAUSED",
+            )
+        )
+    processor.process(_telegram_input(channel_id=607, message_id=1, text="hello"))
+
+    with caplog.at_level(logging.WARNING, logger="telegram_trader.normalize_content"):
+        results = run_normalization(factory)
+
+    assert results == []
+    assert any(
+        "excludes target from normalization" in record.getMessage() for record in caplog.records
+    )
+    with factory() as session:
+        assert session.scalar(select(func.count()).select_from(NormalizedContentRow)) == 0

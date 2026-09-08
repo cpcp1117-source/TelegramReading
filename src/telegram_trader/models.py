@@ -283,3 +283,57 @@ class ChannelPolicy(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
+
+
+class NormalizedContent(Base):
+    """Deterministic normalization of one `telegram_message_versions` row (FR-007).
+
+    `content_id` is derived from `(raw_message_id, normalizer_version)`, so
+    re-normalizing the same message with the same version is naturally
+    idempotent, and bumping `normalizer_version` appends a new row instead of
+    overwriting the old one -- the same "never silently overwrite" convention
+    as edit versions on the raw table. `ON DELETE CASCADE` means retention
+    cleanup deleting an expired raw row removes its normalized derivative
+    too; no separate retention job is needed for this table.
+    """
+
+    __tablename__ = "normalized_content"
+    __table_args__ = (
+        CheckConstraint(
+            "symbol_scope_mode IN ('STATIC_ALLOWLIST', 'BINANCE_USDM_ACTIVE_PERPETUAL')",
+            name="ck_normalized_content_symbol_scope_valid",
+        ),
+        CheckConstraint(
+            "media_review_status IN ('NOT_APPLICABLE', 'PENDING_MANUAL_REVIEW')",
+            name="ck_normalized_content_media_review_valid",
+        ),
+        UniqueConstraint(
+            "raw_message_id",
+            "normalizer_version",
+            name="uq_normalized_content_message_version",
+        ),
+        Index("ix_normalized_content_channel_topic", "channel_id", "topic_id"),
+    )
+
+    content_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    raw_message_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("telegram_message_versions.source_event_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    channel_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    topic_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    normalizer_version: Mapped[str] = mapped_column(String(20), nullable=False)
+    normalized_text: Mapped[str] = mapped_column(Text, nullable=False)
+    symbol_scope_mode: Mapped[str] = mapped_column(String(30), nullable=False)
+    symbol_candidates: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default="[]")
+    resolved_symbols: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default="[]"
+    )
+    media_review_status: Mapped[str] = mapped_column(
+        String(30), nullable=False, server_default="NOT_APPLICABLE"
+    )
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
