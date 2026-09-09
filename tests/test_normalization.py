@@ -96,12 +96,48 @@ def test_resolve_symbol_prohibited_overrides_allowlist() -> None:
     assert decision.status == "INVALID"
 
 
+def test_resolve_symbol_static_allowlist_resolves_bare_asset_via_quote_currency_alias() -> None:
+    """Real channel data: authors write "BTC"/"ETH", the allowlist stores "BTCUSDT"/"ETHUSDT"."""
+    decision = resolve_symbol("BTC", _policy(allowed_symbols=frozenset({"BTCUSDT"})))
+
+    assert decision.symbol == "BTCUSDT"
+    assert decision.status == "VALID"
+
+
+def test_resolve_symbol_static_allowlist_alias_still_invalid_when_no_pair_matches() -> None:
+    decision = resolve_symbol("DOGE", _policy(allowed_symbols=frozenset({"BTCUSDT"})))
+
+    assert decision.status == "INVALID"
+
+
+def test_resolve_symbol_prohibited_blocks_bare_asset_alias_too() -> None:
+    policy = _policy(
+        allowed_symbols=frozenset({"BTCUSDT"}), prohibited_symbols=frozenset({"BTCUSDT"})
+    )
+
+    decision = resolve_symbol("BTC", policy)
+
+    assert decision.status == "INVALID"
+
+
 def test_resolve_symbol_binance_dynamic_scope_is_always_pending() -> None:
     policy = _policy(symbol_scope_mode="BINANCE_USDM_ACTIVE_PERPETUAL", allowed_symbols=frozenset())
 
     decision = resolve_symbol("BTCUSDT", policy)
 
     assert decision.status == "PENDING_MARKET_DATA"
+
+
+def test_resolve_symbol_binance_dynamic_scope_still_respects_prohibited() -> None:
+    policy = _policy(
+        symbol_scope_mode="BINANCE_USDM_ACTIVE_PERPETUAL",
+        allowed_symbols=frozenset(),
+        prohibited_symbols=frozenset({"LUNAUSDT"}),
+    )
+
+    decision = resolve_symbol("LUNAUSDT", policy)
+
+    assert decision.status == "INVALID"
 
 
 def test_resolve_symbol_rejects_unknown_scope_mode() -> None:

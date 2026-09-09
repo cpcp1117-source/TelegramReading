@@ -105,22 +105,43 @@ def extract_symbol_candidates(normalized_text: str) -> list[str]:
     return list(candidates)
 
 
+_QUOTE_CURRENCY_SUFFIXES = ("USDT", "USD", "BUSD")
+
+
+def _candidate_aliases(candidate: str) -> tuple[str, ...]:
+    """A bare base-asset shorthand (e.g. "BTC") plus its common USD-quoted pair spellings.
+
+    Real channel data shows authors routinely write the bare asset name
+    ("BTC", "ETH") even when the channel's allowlist is expressed as a
+    quoted pair ("BTCUSDT"). This only widens what counts as a *match* for
+    `STATIC_ALLOWLIST`; it never invents a pair that isn't already on the
+    channel's declared allowlist.
+    """
+    return (candidate, *(candidate + suffix for suffix in _QUOTE_CURRENCY_SUFFIXES))
+
+
 def resolve_symbol(candidate: str, policy: ChannelSymbolPolicy) -> ResolvedSymbol:
     """Resolve one candidate against its channel's declared symbol scope.
 
     `BINANCE_USDM_ACTIVE_PERPETUAL` always resolves to `PENDING_MARKET_DATA`
     in Phase 4: this phase must not call any Binance endpoint (not even
     public market data -- that starts Phase 5), so a dynamic-scope symbol
-    cannot be confirmed as an active perpetual yet. Marking it explicitly
+    cannot be confirmed as an active perpetual yet, regardless of whether it
+    is spelled as a bare asset or a full pair. Marking it explicitly
     unresolved (rather than guessing VALID) keeps the system fail-closed.
     """
-    if candidate in policy.prohibited_symbols:
-        return ResolvedSymbol(candidate, "INVALID")
-    if policy.symbol_scope_mode == "STATIC_ALLOWLIST":
-        status: SymbolStatus = "VALID" if candidate in policy.allowed_symbols else "INVALID"
-        return ResolvedSymbol(candidate, status)
     if policy.symbol_scope_mode == "BINANCE_USDM_ACTIVE_PERPETUAL":
+        if candidate in policy.prohibited_symbols:
+            return ResolvedSymbol(candidate, "INVALID")
         return ResolvedSymbol(candidate, "PENDING_MARKET_DATA")
+    if policy.symbol_scope_mode == "STATIC_ALLOWLIST":
+        aliases = _candidate_aliases(candidate)
+        if any(alias in policy.prohibited_symbols for alias in aliases):
+            return ResolvedSymbol(candidate, "INVALID")
+        for alias in aliases:
+            if alias in policy.allowed_symbols:
+                return ResolvedSymbol(alias, "VALID")
+        return ResolvedSymbol(candidate, "INVALID")
     raise ValueError(f"unknown symbol_scope_mode: {policy.symbol_scope_mode!r}")
 
 
