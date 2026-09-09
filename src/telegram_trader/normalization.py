@@ -7,7 +7,7 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Literal
 
-CURRENT_NORMALIZER_VERSION = "v1"
+CURRENT_NORMALIZER_VERSION = "v2"
 
 SymbolStatus = Literal["VALID", "INVALID", "PENDING_MARKET_DATA"]
 MediaReviewStatus = Literal["NOT_APPLICABLE", "PENDING_MANUAL_REVIEW"]
