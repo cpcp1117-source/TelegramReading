@@ -7,6 +7,7 @@ import sys
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -39,8 +40,10 @@ from telegram_trader.models import (
     TelegramMessageVersion,
 )
 from telegram_trader.models import NormalizedContent as NormalizedContentRow
+from telegram_trader.models import NormalizedSignal as NormalizedSignalRow
 from telegram_trader.normalize_content import NormalizationResult, run_normalization
 from telegram_trader.outbox import OutboxConsumer
+from telegram_trader.parse_signals import SignalParsingResult, run_signal_parsing
 from telegram_trader.retention_cleanup import run_retention_cleanup
 from telegram_trader.telegram_collector import TelethonReadOnlyCollector
 from telegram_trader.telegram_storage import (
@@ -61,6 +64,7 @@ def engine() -> Iterator[Engine]:
         connection.execute(
             text(
                 "TRUNCATE TABLE outbox_delivery_receipts, outbox_events, "
+                "normalized_signals, signal_parse_checkpoints, "
                 "normalized_content, telegram_message_versions, telegram_collector_checkpoints, "
                 "mock_message_receipts, consumer_checkpoints, audit_events, "
                 "channel_policies "
@@ -935,3 +939,401 @@ def test_run_normalization_skips_target_with_revoked_authorization(
     )
     with factory() as session:
         assert session.scalar(select(func.count()).select_from(NormalizedContentRow)) == 0
+
+
+def _run_pipeline(factory, channel_id: int, **overrides: object) -> None:  # type: ignore[no-untyped-def]
+    """Process one raw message and normalize it, so a signal test has real input to parse."""
+    topic_id = overrides.get("topic_id")
+    assert topic_id is None or isinstance(topic_id, int)
+    processor = TelegramMessageProcessor(
+        factory, MediaStore(Path("media")), frozenset({(channel_id, topic_id)})
+    )
+    processor.process(_telegram_input(channel_id=channel_id, **overrides))
+    run_normalization(factory)
+
+
+def _result_for(results: list[SignalParsingResult], channel_id: int) -> SignalParsingResult:
+    return next(r for r in results if r.channel_id == channel_id)
+
+
+def test_run_signal_parsing_reaches_validated_for_static_allowlist(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    with factory.begin() as session:
+        session.add(
+            _channel_policy(
+                channel_id=700,
+                topic_id=0,
+                channel_type="EXECUTION_SIGNAL",
+                symbol_scope_mode="STATIC_ALLOWLIST",
+                allowed_symbols=["BTCUSDT"],
+                automation_authorization="GRANTED",
+                gate_decision="ENABLED",
+            )
+        )
+    _run_pipeline(factory, 700, message_id=1, text="BTC 多 市價進場")
+
+    results = run_signal_parsing(factory)
+
+    assert _result_for(results, 700).processed_count == 1
+    with factory() as session:
+        row = session.scalar(
+            select(NormalizedSignalRow).where(NormalizedSignalRow.channel_id == 700)
+        )
+        assert row is not None
+        assert row.status == "VALIDATED"
+        assert row.symbol == "BTCUSDT"
+        assert row.side == "LONG"
+        assert row.revision == 0
+        assert row.link_method is None
+
+
+def test_run_signal_parsing_dynamic_scope_never_reaches_validated(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    with factory.begin() as session:
+        session.add(
+            _channel_policy(
+                channel_id=701,
+                topic_id=0,
+                channel_type="EXECUTION_SIGNAL",
+                symbol_scope_mode="BINANCE_USDM_ACTIVE_PERPETUAL",
+                automation_authorization="GRANTED",
+                gate_decision="MONITOR_ONLY",
+            )
+        )
+    _run_pipeline(factory, 701, message_id=1, text="ARB 空 市價進場附近0.1950")
+
+    run_signal_parsing(factory)
+
+    with factory() as session:
+        row = session.scalar(
+            select(NormalizedSignalRow).where(NormalizedSignalRow.channel_id == 701)
+        )
+        assert row is not None
+        assert row.status == "NEW"
+        assert row.side == "SHORT"
+
+
+def test_run_signal_parsing_missing_side_is_incomplete(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    with factory.begin() as session:
+        session.add(
+            _channel_policy(
+                channel_id=702,
+                topic_id=0,
+                channel_type="EXECUTION_SIGNAL",
+                symbol_scope_mode="STATIC_ALLOWLIST",
+                allowed_symbols=["BTCUSDT"],
+                automation_authorization="GRANTED",
+                gate_decision="MONITOR_ONLY",
+            )
+        )
+    _run_pipeline(factory, 702, message_id=1, text="BTC 50倍 進場0.1686")
+
+    run_signal_parsing(factory)
+
+    with factory() as session:
+        row = session.scalar(
+            select(NormalizedSignalRow).where(NormalizedSignalRow.channel_id == 702)
+        )
+        assert row is not None
+        assert row.status == "INCOMPLETE"
+        assert row.side is None
+
+
+def test_run_signal_parsing_promotional_message_produces_no_row(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    with factory.begin() as session:
+        session.add(
+            _channel_policy(
+                channel_id=703,
+                topic_id=0,
+                channel_type="EXECUTION_SIGNAL",
+                symbol_scope_mode="STATIC_ALLOWLIST",
+                allowed_symbols=["BTCUSDT"],
+                automation_authorization="GRANTED",
+                gate_decision="MONITOR_ONLY",
+            )
+        )
+    _run_pipeline(factory, 703, message_id=1, text="$BTC 衝高已經翻倍了,恭喜早期跟上車的朋友們")
+
+    results = run_signal_parsing(factory)
+
+    assert _result_for(results, 703).processed_count == 0
+    assert _result_for(results, 703).skipped_count == 1
+    with factory() as session:
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(NormalizedSignalRow)
+                .where(NormalizedSignalRow.channel_id == 703)
+            )
+            == 0
+        )
+
+
+def test_run_signal_parsing_reply_cancel_creates_linked_revision(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    with factory.begin() as session:
+        session.add(
+            _channel_policy(
+                channel_id=704,
+                topic_id=0,
+                channel_type="EXECUTION_SIGNAL",
+                symbol_scope_mode="STATIC_ALLOWLIST",
+                allowed_symbols=["BTCUSDT"],
+                automation_authorization="GRANTED",
+                gate_decision="ENABLED",
+            )
+        )
+    now = datetime(2026, 9, 6, 8, 0, tzinfo=UTC)
+    processor = TelegramMessageProcessor(
+        factory, MediaStore(Path("media")), frozenset({(704, None)})
+    )
+    processor.process(
+        _telegram_input(
+            channel_id=704, message_id=1, text="BTC 多 市價進場", source_date=now, received_at=now
+        )
+    )
+    processor.process(
+        _telegram_input(
+            channel_id=704,
+            message_id=2,
+            text="取消",
+            reply_to_message_id=1,
+            source_date=now + timedelta(minutes=1),
+            received_at=now + timedelta(minutes=1),
+        )
+    )
+    run_normalization(factory)
+
+    run_signal_parsing(factory)
+
+    with factory() as session:
+        rows = list(
+            session.scalars(
+                select(NormalizedSignalRow)
+                .where(NormalizedSignalRow.channel_id == 704)
+                .order_by(NormalizedSignalRow.revision)
+            )
+        )
+        assert len(rows) == 2
+        origin, follow_up = rows
+        assert origin.revision == 0
+        assert follow_up.revision == 1
+        assert follow_up.signal_id == origin.signal_id
+        assert follow_up.status == "CANCELLED"
+        assert follow_up.symbol == origin.symbol
+        assert follow_up.side == origin.side
+        assert follow_up.link_method == "REPLY"
+
+
+def test_run_signal_parsing_reply_with_new_stop_updates_stop_only(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    with factory.begin() as session:
+        session.add(
+            _channel_policy(
+                channel_id=705,
+                topic_id=0,
+                channel_type="EXECUTION_SIGNAL",
+                symbol_scope_mode="STATIC_ALLOWLIST",
+                allowed_symbols=["BTCUSDT"],
+                automation_authorization="GRANTED",
+                gate_decision="ENABLED",
+            )
+        )
+    now = datetime(2026, 9, 6, 8, 0, tzinfo=UTC)
+    processor = TelegramMessageProcessor(
+        factory, MediaStore(Path("media")), frozenset({(705, None)})
+    )
+    processor.process(
+        _telegram_input(
+            channel_id=705, message_id=1, text="BTC 多 市價進場", source_date=now, received_at=now
+        )
+    )
+    processor.process(
+        _telegram_input(
+            channel_id=705,
+            message_id=2,
+            text="止損6.5",
+            reply_to_message_id=1,
+            source_date=now + timedelta(minutes=1),
+            received_at=now + timedelta(minutes=1),
+        )
+    )
+    run_normalization(factory)
+
+    run_signal_parsing(factory)
+
+    with factory() as session:
+        rows = list(
+            session.scalars(
+                select(NormalizedSignalRow)
+                .where(NormalizedSignalRow.channel_id == 705)
+                .order_by(NormalizedSignalRow.revision)
+            )
+        )
+        assert len(rows) == 2
+        origin, follow_up = rows
+        assert follow_up.signal_id == origin.signal_id
+        assert follow_up.symbol == origin.symbol
+        assert follow_up.side == origin.side
+        assert follow_up.status == origin.status
+        assert follow_up.stop_value == pytest.approx(Decimal("6.5"))
+        assert follow_up.stop_origin == "AUTHOR"
+        assert follow_up.link_method == "REPLY"
+
+
+def test_run_signal_parsing_is_idempotent(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    with factory.begin() as session:
+        session.add(
+            _channel_policy(
+                channel_id=706,
+                topic_id=0,
+                channel_type="EXECUTION_SIGNAL",
+                symbol_scope_mode="STATIC_ALLOWLIST",
+                allowed_symbols=["BTCUSDT"],
+                automation_authorization="GRANTED",
+                gate_decision="ENABLED",
+            )
+        )
+    _run_pipeline(factory, 706, message_id=1, text="BTC 多 市價進場")
+
+    first = run_signal_parsing(factory)
+    second = run_signal_parsing(factory)
+
+    assert _result_for(first, 706).processed_count == 1
+    assert _result_for(second, 706).processed_count == 0
+    with factory() as session:
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(NormalizedSignalRow)
+                .where(NormalizedSignalRow.channel_id == 706)
+            )
+            == 1
+        )
+
+
+def test_run_signal_parsing_version_bump_appends_new_row(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    with factory.begin() as session:
+        session.add(
+            _channel_policy(
+                channel_id=707,
+                topic_id=0,
+                channel_type="EXECUTION_SIGNAL",
+                symbol_scope_mode="STATIC_ALLOWLIST",
+                allowed_symbols=["BTCUSDT"],
+                automation_authorization="GRANTED",
+                gate_decision="ENABLED",
+            )
+        )
+    _run_pipeline(factory, 707, message_id=1, text="BTC 多 市價進場")
+
+    run_signal_parsing(factory, version="v1")
+    run_signal_parsing(factory, version="v2")
+
+    with factory() as session:
+        versions = sorted(
+            row.parser_version
+            for row in session.scalars(
+                select(NormalizedSignalRow).where(NormalizedSignalRow.channel_id == 707)
+            )
+        )
+        assert versions == ["v1", "v2"]
+
+
+def test_normalized_signal_cannot_be_updated(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    with factory.begin() as session:
+        session.add(
+            _channel_policy(
+                channel_id=708,
+                topic_id=0,
+                channel_type="EXECUTION_SIGNAL",
+                symbol_scope_mode="STATIC_ALLOWLIST",
+                allowed_symbols=["BTCUSDT"],
+                automation_authorization="GRANTED",
+                gate_decision="ENABLED",
+            )
+        )
+    _run_pipeline(factory, 708, message_id=1, text="BTC 多 市價進場")
+    run_signal_parsing(factory)
+
+    with engine.connect() as connection, pytest.raises(DBAPIError, match="append-only"):
+        connection.execute(text("UPDATE normalized_signals SET status='CANCELLED'"))
+
+
+def test_normalized_signal_is_deleted_when_raw_row_is_purged(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    now = datetime(2026, 9, 9, 0, 0, tzinfo=UTC)
+    with factory.begin() as session:
+        session.add(
+            _channel_policy(
+                channel_id=709,
+                topic_id=0,
+                channel_type="EXECUTION_SIGNAL",
+                symbol_scope_mode="STATIC_ALLOWLIST",
+                allowed_symbols=["BTCUSDT"],
+                raw_retention_days=1,
+                automation_authorization="GRANTED",
+                gate_decision="ENABLED",
+            )
+        )
+    _run_pipeline(
+        factory, 709, message_id=1, received_at=now - timedelta(days=5), text="BTC 多 市價進場"
+    )
+    run_signal_parsing(factory)
+    with factory() as session:
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(NormalizedSignalRow)
+                .where(NormalizedSignalRow.channel_id == 709)
+            )
+            == 1
+        )
+
+    run_retention_cleanup(factory, MediaStore(Path("media")), now=lambda: now)
+
+    with factory() as session:
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(NormalizedSignalRow)
+                .where(NormalizedSignalRow.channel_id == 709)
+            )
+            == 0
+        )
+
+
+def test_run_signal_parsing_never_parses_analysis_channel(engine: Engine) -> None:
+    """BR-001: only EXECUTION_SIGNAL channels are parsed; ANALYSIS is Phase 5 territory."""
+    factory = create_session_factory(engine)
+    with factory.begin() as session:
+        session.add(
+            _channel_policy(
+                channel_id=710,
+                topic_id=0,
+                channel_type="ANALYSIS",
+                symbol_scope_mode="STATIC_ALLOWLIST",
+                allowed_symbols=["BTCUSDT"],
+                automation_authorization="GRANTED",
+                gate_decision="MONITOR_ONLY",
+            )
+        )
+    _run_pipeline(factory, 710, message_id=1, text="BTC 多 市價進場")
+
+    results = run_signal_parsing(factory)
+
+    assert results == []
+    with factory() as session:
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(NormalizedSignalRow)
+                .where(NormalizedSignalRow.channel_id == 710)
+            )
+            == 0
+        )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
@@ -12,6 +13,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -336,4 +338,115 @@ class NormalizedContent(Base):
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class NormalizedSignal(Base):
+    """One immutable revision of a parsed EXECUTION_SIGNAL lifecycle (FR-009/FR-010/FR-011).
+
+    `signal_row_id` is this row's own identity, derived from
+    `(raw_message_id, parser_version)` -- idempotent re-parsing, and a
+    `parser_version` bump appends fresh rows rather than overwriting old
+    ones (same convention as `NormalizedContent`). `signal_id` is the
+    separate, stable *aggregate* identity shared across every revision of
+    "the same trading idea": revision 0 derives it from its own
+    `raw_message_id`; a reply-linked follow-up inherits its parent's
+    `signal_id` and increments `revision`. The current state of a signal is
+    whichever row has the highest `revision` for that `signal_id` -- older
+    revisions are never updated or deleted except via the same
+    `ON DELETE CASCADE` retention path as `NormalizedContent`.
+    """
+
+    __tablename__ = "normalized_signals"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('NEW', 'INCOMPLETE', 'VALIDATED', 'CANCELLED', 'EXPIRED', 'SUPERSEDED')",
+            name="ck_normalized_signal_status_valid",
+        ),
+        CheckConstraint(
+            "side IS NULL OR side IN ('LONG', 'SHORT')",
+            name="ck_normalized_signal_side_valid",
+        ),
+        CheckConstraint(
+            "entry_type IS NULL OR entry_type IN ('MARKET', 'LIMIT', 'RANGE')",
+            name="ck_normalized_signal_entry_type_valid",
+        ),
+        CheckConstraint(
+            "stop_origin IN ('AUTHOR', 'DEFAULT_ROE_30', 'NONE')",
+            name="ck_normalized_signal_stop_origin_valid",
+        ),
+        CheckConstraint("revision >= 0", name="ck_normalized_signal_revision_non_negative"),
+        UniqueConstraint(
+            "signal_id",
+            "revision",
+            "parser_version",
+            name="uq_normalized_signal_id_revision",
+        ),
+        UniqueConstraint(
+            "raw_message_id",
+            "parser_version",
+            name="uq_normalized_signal_message_version",
+        ),
+        Index("ix_normalized_signal_signal_id", "signal_id"),
+        Index("ix_normalized_signal_channel_topic", "channel_id", "topic_id"),
+    )
+
+    signal_row_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    signal_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    raw_message_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("telegram_message_versions.source_event_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    normalizer_version: Mapped[str] = mapped_column(String(20), nullable=False)
+    channel_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    topic_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    symbol: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    side: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    entry_type: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    entry_values: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, server_default="[]")
+    stop_value: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    stop_origin: Mapped[str] = mapped_column(String(20), nullable=False)
+    take_profits: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, server_default="[]")
+    evidence_spans: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    link_method: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    parser_version: Mapped[str] = mapped_column(String(20), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class SignalParseCheckpoint(Base):
+    """Progress cursor for `parse_signals.py`, keyed by `(channel_id, topic_id, parser_version)`.
+
+    Unlike `NormalizedContent` (where every input row always produces
+    exactly one output row, so "no output row yet" doubles as "not yet
+    processed"), a `normalized_content` row may legitimately produce *no*
+    `NormalizedSignal` row at all (promotional/non-signal text). Without a
+    separate cursor, a batch run would re-select and re-skip those same
+    rows forever. The cursor is a `(received_at, raw_message_id)` pair so
+    ties on an identical `received_at` are still ordered deterministically.
+    A `parser_version` bump starts a fresh cursor (new PK), naturally
+    reprocessing full history under the new version without disturbing the
+    old version's checkpoint.
+    """
+
+    __tablename__ = "signal_parse_checkpoints"
+    __table_args__ = (
+        CheckConstraint("channel_id > 0", name="ck_signal_parse_checkpoint_channel_positive"),
+        CheckConstraint("topic_id >= 0", name="ck_signal_parse_checkpoint_topic_non_negative"),
+    )
+
+    channel_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    topic_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, server_default="0")
+    parser_version: Mapped[str] = mapped_column(String(20), primary_key=True)
+    last_received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_raw_message_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
