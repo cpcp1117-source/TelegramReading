@@ -5,7 +5,6 @@ import contextlib
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 
 import pytest
 
@@ -52,10 +51,17 @@ class FakeBotClient:
 
 @dataclass
 class FakeEvent:
+    """Mirrors Telethon's `CallbackQuery.Event` shape: the query id is `event.id`
+
+    directly (a convenience property over the raw `UpdateBotCallbackQuery`,
+    whose own field is `query_id`, not `id` -- a mismatch that caused a real
+    `AttributeError` in production before `id` replaced `query.id` here).
+    """
+
     sender_id: int | None
     raw_text: str | None = None
     data: bytes | None = None
-    query_id: int = 1
+    id: int = 1
     replies: list[tuple[str, object]] = field(default_factory=list)
     answers: list[tuple[str | None, bool]] = field(default_factory=list)
     edits: list[tuple[str, object]] = field(default_factory=list)
@@ -68,10 +74,6 @@ class FakeEvent:
 
     async def edit(self, text: str, buttons: object = None) -> None:
         self.edits.append((text, buttons))
-
-    @property
-    def query(self) -> object:
-        return SimpleNamespace(id=self.query_id)
 
 
 def _make_bot(*, clock: Callable[[], datetime] | None = None) -> ControlBot:

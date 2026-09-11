@@ -269,7 +269,7 @@ class ControlBot:
                     session,
                     request_id=request.request_id,
                     actor_user_id=event.sender_id,
-                    callback_query_id=str(event.query.id),
+                    callback_query_id=str(event.id),
                     action=action,
                 )
 
