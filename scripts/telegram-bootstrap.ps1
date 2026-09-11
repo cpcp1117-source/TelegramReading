@@ -47,8 +47,14 @@ $databasePasswordSecure = $null
 $databasePasswordPlain = $null
 
 if ($Command -eq 'collect') {
-    $databasePasswordSecure = Read-Host 'PostgreSQL password (hidden; terminal only)' -AsSecureString
-    $databasePasswordPlain = [System.Net.NetworkCredential]::new('', $databasePasswordSecure).Password
+    $databasePasswordPlain = Read-DotEnvValue -Path $dotEnvPath -Key 'POSTGRES_PASSWORD'
+    if ($databasePasswordPlain) {
+        Write-Host 'Using POSTGRES_PASSWORD from local .env (not shown).'
+    }
+    else {
+        $databasePasswordSecure = Read-Host 'PostgreSQL password (hidden; terminal only)' -AsSecureString
+        $databasePasswordPlain = [System.Net.NetworkCredential]::new('', $databasePasswordSecure).Password
+    }
 }
 
 try {
