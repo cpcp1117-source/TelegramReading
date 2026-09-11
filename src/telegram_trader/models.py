@@ -460,11 +460,17 @@ class SignalDecisionRequest(Base):
     `signal_row_id`, so a given revision is requested at most once.
     `expires_at` inherits the underlying signal's own `expires_at`; Phase 4
     has no live execution urgency to justify a separate, shorter countdown.
+
+    `nonce` is `UNIQUE`: Telegram caps inline-button callback data at 64
+    bytes, too small to carry the full `request_id` alongside it, so a
+    button tap is resolved back to its request by `nonce` alone
+    (`signal_decisions.find_request_by_nonce`).
     """
 
     __tablename__ = "signal_decision_requests"
     __table_args__ = (
         UniqueConstraint("signal_row_id", name="uq_signal_decision_request_signal_row"),
+        UniqueConstraint("nonce", name="uq_signal_decision_request_nonce"),
         Index("ix_signal_decision_request_signal_id", "signal_id"),
     )
 

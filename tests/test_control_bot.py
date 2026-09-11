@@ -115,14 +115,22 @@ def _signal(**overrides: object) -> NormalizedSignal:
 
 
 def test_signal_callback_round_trip() -> None:
-    encoded = encode_signal_callback("req-1", "nonce-1", "APPROVE")
-    assert decode_signal_callback(encoded) == ("req-1", "nonce-1", "APPROVE")
+    """Must fit Telegram's 64-byte callback-data cap even with a full-length nonce."""
+    encoded = encode_signal_callback("nonce-1", "APPROVE")
+    assert len(encoded) <= 64
+    assert decode_signal_callback(encoded) == ("nonce-1", "APPROVE")
+
+
+def test_signal_callback_round_trip_with_realistic_nonce_stays_under_limit() -> None:
+    encoded = encode_signal_callback(generate_nonce(), "APPROVE")
+    assert len(encoded) <= 64
 
 
 def test_signal_callback_rejects_garbage() -> None:
     assert decode_signal_callback(b"not-valid-data") is None
-    assert decode_signal_callback(b"signal:only:three") is None
-    assert decode_signal_callback(b"close_all:nonce:req:extra") is None
+    assert decode_signal_callback(b"signal:only") is None
+    assert decode_signal_callback(b"signal:nonce:GARBAGE") is None
+    assert decode_signal_callback(b"close_all:nonce:req") is None
 
 
 def test_close_all_callback_round_trip() -> None:
@@ -131,7 +139,7 @@ def test_close_all_callback_round_trip() -> None:
 
 
 def test_close_all_callback_rejects_signal_data() -> None:
-    encoded = encode_signal_callback("req-1", "nonce-1", "APPROVE")
+    encoded = encode_signal_callback("nonce-1", "APPROVE")
     assert decode_close_all_callback(encoded) is None
 
 
@@ -192,7 +200,7 @@ async def test_on_message_silently_rejects_unauthorized_sender() -> None:
 @pytest.mark.anyio
 async def test_on_callback_silently_rejects_unauthorized_sender() -> None:
     bot = _make_bot()
-    event = FakeEvent(sender_id=999, data=encode_signal_callback("r", "n", "APPROVE"))
+    event = FakeEvent(sender_id=999, data=encode_signal_callback("n", "APPROVE"))
 
     await bot._on_callback(event)
 

@@ -14,14 +14,14 @@ from telethon import Button, TelegramClient, events  # type: ignore[import-untyp
 from telegram_trader.config import Settings, get_settings
 from telegram_trader.db import create_db_engine, create_session_factory
 from telegram_trader.logging_config import configure_logging
-from telegram_trader.models import NormalizedSignal, SignalDecisionRequest
+from telegram_trader.models import NormalizedSignal
 from telegram_trader.signal_decisions import (
     DecisionAction,
     DecisionOutcome,
     create_request,
+    find_request_by_nonce,
     load_pending_signals,
     record_decision,
-    request_id_for_signal_row,
 )
 from telegram_trader.telegram_collector import reconnect_delay
 from telegram_trader.telegram_readonly import prepare_session_path
@@ -53,23 +53,29 @@ def generate_nonce() -> str:
     return secrets.token_hex(16)
 
 
-def encode_signal_callback(request_id: str, nonce: str, action: DecisionAction) -> bytes:
-    parts = (_CALLBACK_PREFIX_SIGNAL, request_id, nonce, action)
+def encode_signal_callback(nonce: str, action: DecisionAction) -> bytes:
+    """Telegram caps callback data at 64 bytes -- too small to also carry the
+
+    64-character `request_id`, so only the nonce (unique, 128 bits) travels
+    in the button; a tap is resolved back to its request by nonce alone
+    (`signal_decisions.find_request_by_nonce`).
+    """
+    parts = (_CALLBACK_PREFIX_SIGNAL, nonce, action)
     return _CALLBACK_SEP.join(parts).encode()
 
 
-def decode_signal_callback(data: bytes) -> tuple[str, str, DecisionAction] | None:
+def decode_signal_callback(data: bytes) -> tuple[str, DecisionAction] | None:
     try:
         text = data.decode()
     except UnicodeDecodeError:
         return None
     parts = text.split(_CALLBACK_SEP)
-    if len(parts) != 4 or parts[0] != _CALLBACK_PREFIX_SIGNAL:
+    if len(parts) != 3 or parts[0] != _CALLBACK_PREFIX_SIGNAL:
         return None
-    _, request_id, nonce, action = parts
+    _, nonce, action = parts
     if action not in ("APPROVE", "REJECT"):
         return None
-    return request_id, nonce, cast(DecisionAction, action)
+    return nonce, cast(DecisionAction, action)
 
 
 def encode_close_all_callback(nonce: str) -> bytes:
@@ -153,15 +159,10 @@ class ControlBot:
             pending = load_pending_signals(session)
             for signal in pending:
                 nonce = generate_nonce()
-                request_id = request_id_for_signal_row(signal.signal_row_id)
                 buttons = [
                     [
-                        Button.inline(
-                            "✅ Approve", encode_signal_callback(request_id, nonce, "APPROVE")
-                        ),
-                        Button.inline(
-                            "❌ Reject", encode_signal_callback(request_id, nonce, "REJECT")
-                        ),
+                        Button.inline("✅ Approve", encode_signal_callback(nonce, "APPROVE")),
+                        Button.inline("❌ Reject", encode_signal_callback(nonce, "REJECT")),
                     ]
                 ]
                 message = await self._client.send_message(
@@ -257,16 +258,16 @@ class ControlBot:
         if decoded is None:
             await event.answer("無效的操作", alert=True)
             return
-        request_id, nonce, action = decoded
+        nonce, action = decoded
 
         with self._session_factory.begin() as session:
-            request = session.get(SignalDecisionRequest, request_id)
-            if request is None or request.nonce != nonce:
+            request = find_request_by_nonce(session, nonce)
+            if request is None:
                 outcome = None
             else:
                 outcome = record_decision(
                     session,
-                    request_id=request_id,
+                    request_id=request.request_id,
                     actor_user_id=event.sender_id,
                     callback_query_id=str(event.query.id),
                     action=action,

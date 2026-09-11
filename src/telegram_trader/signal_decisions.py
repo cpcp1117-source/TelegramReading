@@ -81,6 +81,19 @@ def create_request(
     )
 
 
+def find_request_by_nonce(session: Session, nonce: str) -> SignalDecisionRequest | None:
+    """Resolve a button tap's callback data back to its request.
+
+    Telegram caps callback data at 64 bytes, too small to carry the full
+    64-character `request_id` alongside the nonce -- the nonce (128 bits of
+    randomness, `UNIQUE`-constrained) is the only value that needs to travel
+    in the button itself. An unresolvable nonce (forged/garbage callback
+    data) simply returns `None`, the same fail-closed outcome as an unknown
+    `request_id` did before this lookup existed.
+    """
+    return session.scalar(select(SignalDecisionRequest).where(SignalDecisionRequest.nonce == nonce))
+
+
 def _is_current_revision(session: Session, request: SignalDecisionRequest) -> bool:
     max_revision = session.scalar(
         select(func.max(NormalizedSignal.revision)).where(
