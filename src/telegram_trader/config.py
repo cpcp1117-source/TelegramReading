@@ -8,7 +8,7 @@ from pydantic import AliasChoices, BaseModel, Field, SecretStr, field_validator,
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import URL, make_url
 
-RuntimeEnvironment = Literal["offline", "telegram_readonly"]
+RuntimeEnvironment = Literal["offline", "telegram_readonly", "control_bot"]
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
 
@@ -83,6 +83,28 @@ class Settings(BaseSettings):
             "POLICY_POLL_INTERVAL_SECONDS", "APP_POLICY_POLL_INTERVAL_SECONDS"
         ),
     )
+    control_bot_token: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("CONTROL_BOT_TOKEN", "APP_CONTROL_BOT_TOKEN"),
+    )
+    control_bot_allowlisted_user_id: int | None = Field(
+        default=None,
+        gt=0,
+        validation_alias=AliasChoices(
+            "CONTROL_BOT_ALLOWLISTED_USER_ID", "APP_CONTROL_BOT_ALLOWLISTED_USER_ID"
+        ),
+    )
+    control_bot_session_path: Path = Field(
+        default=Path("secrets/telegram/control-bot"),
+        validation_alias=AliasChoices("CONTROL_BOT_SESSION_PATH", "APP_CONTROL_BOT_SESSION_PATH"),
+    )
+    control_bot_poll_interval_seconds: float = Field(
+        default=60.0,
+        gt=0,
+        validation_alias=AliasChoices(
+            "CONTROL_BOT_POLL_INTERVAL_SECONDS", "APP_CONTROL_BOT_POLL_INTERVAL_SECONDS"
+        ),
+    )
 
     @field_validator("database_url")
     @classmethod
@@ -128,7 +150,14 @@ class Settings(BaseSettings):
             raise ValueError("Telegram API hash cannot be blank")
         return value
 
-    @field_validator("telegram_session_path")
+    @field_validator("control_bot_token")
+    @classmethod
+    def validate_non_empty_control_bot_token(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None and not value.get_secret_value().strip():
+            raise ValueError("Control Bot token cannot be blank")
+        return value
+
+    @field_validator("telegram_session_path", "control_bot_session_path")
     @classmethod
     def validate_telegram_session_path(cls, value: Path) -> Path:
         if not value.parts:
@@ -153,11 +182,18 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_telegram_credentials_for_runtime(self) -> Settings:
-        if self.environment == "telegram_readonly" and (
+        if self.environment in ("telegram_readonly", "control_bot") and (
             self.telegram_api_id is None or self.telegram_api_hash is None
         ):
             raise ValueError(
-                "TELEGRAM_API_ID and TELEGRAM_API_HASH are required for telegram_readonly"
+                "TELEGRAM_API_ID and TELEGRAM_API_HASH are required "
+                "for telegram_readonly and control_bot"
+            )
+        if self.environment == "control_bot" and (
+            self.control_bot_token is None or self.control_bot_allowlisted_user_id is None
+        ):
+            raise ValueError(
+                "CONTROL_BOT_TOKEN and CONTROL_BOT_ALLOWLISTED_USER_ID are required for control_bot"
             )
         return self
 

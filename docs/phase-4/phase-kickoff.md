@@ -45,7 +45,7 @@ This phase does **not** build `TradeIntent` submission, does **not** call any Bi
 - Follow-up matching only via reply, message link, explicit signal ID, or an otherwise-unique lifecycle match; anything ambiguous stays manual, never guessed by same-symbol proximity (FR-011).
 
 ### 3. Control Bot (new component, new credential)
-- Separate Telegram **Bot API** client (not the existing MTProto user session) — a new `TELEGRAM_BOT_TOKEN`, created by the user via @BotFather and supplied the same way prior credentials were: local, git-ignored `.env`, never pasted into chat.
+- Separate Telegram **Bot API** client (not the existing MTProto user session) — a new `CONTROL_BOT_TOKEN` (named per [credential-handoff.md](../phase-0/credential-handoff.md) §2/§4, the Phase 0 authoritative naming — an earlier draft of this document said `TELEGRAM_BOT_TOKEN`, which was a naming slip), created by the user via @BotFather and supplied the same way prior credentials were: local, git-ignored `.env`, never pasted into chat.
 - Single numeric allowlisted user ID; any other sender is rejected (NFR-007, target rejection rate 100%).
 - Status/notification commands: new signal, lifecycle transitions.
 - Manual approve/reject recording for `VALIDATED` signals — per BR-002, `EXECUTION_SIGNAL` only becomes eligible for *automatic* action after the Production Gate (Gate 8), so before that, every validated signal still needs an explicit human decision. Phase 4 records that decision; it does not act on it (no Risk Engine/Execution Gateway exist until Phase 6).

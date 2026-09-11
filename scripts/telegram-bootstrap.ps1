@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('login', 'dialogs', 'discover-private', 'preview', 'collect')]
+    [ValidateSet('login', 'dialogs', 'discover-private', 'preview', 'collect', 'control-bot')]
     [string]$Command = 'login'
 )
 
@@ -45,8 +45,9 @@ else {
 }
 $databasePasswordSecure = $null
 $databasePasswordPlain = $null
+$needsDatabase = $Command -in @('collect', 'control-bot')
 
-if ($Command -eq 'collect') {
+if ($needsDatabase) {
     $databasePasswordPlain = Read-DotEnvValue -Path $dotEnvPath -Key 'POSTGRES_PASSWORD'
     if ($databasePasswordPlain) {
         Write-Host 'Using POSTGRES_PASSWORD from local .env (not shown).'
@@ -54,6 +55,28 @@ if ($Command -eq 'collect') {
     else {
         $databasePasswordSecure = Read-Host 'PostgreSQL password (hidden; terminal only)' -AsSecureString
         $databasePasswordPlain = [System.Net.NetworkCredential]::new('', $databasePasswordSecure).Password
+    }
+}
+
+$controlBotTokenPlain = $null
+$controlBotTokenSecure = $null
+$controlBotUserIdInput = $null
+
+if ($Command -eq 'control-bot') {
+    $controlBotTokenPlain = Read-DotEnvValue -Path $dotEnvPath -Key 'CONTROL_BOT_TOKEN'
+    if ($controlBotTokenPlain) {
+        Write-Host 'Using CONTROL_BOT_TOKEN from local .env (not shown).'
+    }
+    else {
+        $controlBotTokenSecure = Read-Host 'Control Bot token (hidden; terminal only)' -AsSecureString
+        $controlBotTokenPlain = [System.Net.NetworkCredential]::new('', $controlBotTokenSecure).Password
+    }
+    $controlBotUserIdInput = Read-DotEnvValue -Path $dotEnvPath -Key 'CONTROL_BOT_ALLOWLISTED_USER_ID'
+    if ($controlBotUserIdInput) {
+        Write-Host 'Using CONTROL_BOT_ALLOWLISTED_USER_ID from local .env.'
+    }
+    else {
+        $controlBotUserIdInput = Read-Host 'Your numeric Telegram user ID (the only allowlisted approver)'
     }
 }
 
@@ -65,16 +88,25 @@ try {
     if ([string]::IsNullOrWhiteSpace($apiHashPlain)) {
         throw 'Telegram API Hash cannot be blank.'
     }
-    if ($Command -eq 'collect' -and [string]::IsNullOrWhiteSpace($databasePasswordPlain)) {
+    if ($needsDatabase -and [string]::IsNullOrWhiteSpace($databasePasswordPlain)) {
         throw 'PostgreSQL password cannot be blank.'
     }
+    $parsedControlBotUserId = 0
+    if ($Command -eq 'control-bot') {
+        if ([string]::IsNullOrWhiteSpace($controlBotTokenPlain)) {
+            throw 'Control Bot token cannot be blank.'
+        }
+        if (-not [int64]::TryParse($controlBotUserIdInput, [ref]$parsedControlBotUserId) -or $parsedControlBotUserId -le 0) {
+            throw 'Control Bot allowlisted user ID must be a positive integer.'
+        }
+    }
 
-    $env:APP_ENVIRONMENT = 'telegram_readonly'
     $env:TELEGRAM_API_ID = $parsedApiId.ToString()
     $env:TELEGRAM_API_HASH = $apiHashPlain
-    $env:TELEGRAM_SESSION_PATH = 'secrets/telegram/collector'
 
     if ($Command -eq 'collect') {
+        $env:APP_ENVIRONMENT = 'telegram_readonly'
+        $env:TELEGRAM_SESSION_PATH = 'secrets/telegram/collector'
         $env:POSTGRES_PASSWORD = $databasePasswordPlain
         & docker compose --profile telegram build collector
         if ($LASTEXITCODE -ne 0) {
@@ -86,7 +118,24 @@ try {
         }
         & docker compose --profile telegram run --rm collector
     }
+    elseif ($Command -eq 'control-bot') {
+        $env:APP_ENVIRONMENT = 'control_bot'
+        $env:POSTGRES_PASSWORD = $databasePasswordPlain
+        $env:CONTROL_BOT_TOKEN = $controlBotTokenPlain
+        $env:CONTROL_BOT_ALLOWLISTED_USER_ID = $parsedControlBotUserId.ToString()
+        & docker compose --profile control-bot build control-bot
+        if ($LASTEXITCODE -ne 0) {
+            throw "Control Bot image build failed with exit code $LASTEXITCODE"
+        }
+        & docker compose --profile control-bot run --rm control-bot alembic upgrade head
+        if ($LASTEXITCODE -ne 0) {
+            throw "Database migration failed with exit code $LASTEXITCODE"
+        }
+        & docker compose --profile control-bot run --rm control-bot
+    }
     else {
+        $env:APP_ENVIRONMENT = 'telegram_readonly'
+        $env:TELEGRAM_SESSION_PATH = 'secrets/telegram/collector'
         & uv run --no-sync python -m telegram_trader.telegram_cli $Command
     }
     $commandExitCode = $LASTEXITCODE
@@ -100,9 +149,14 @@ finally {
     Remove-Item Env:TELEGRAM_SESSION_PATH -ErrorAction SilentlyContinue
     Remove-Item Env:APP_ENVIRONMENT -ErrorAction SilentlyContinue
     Remove-Item Env:POSTGRES_PASSWORD -ErrorAction SilentlyContinue
+    Remove-Item Env:CONTROL_BOT_TOKEN -ErrorAction SilentlyContinue
+    Remove-Item Env:CONTROL_BOT_ALLOWLISTED_USER_ID -ErrorAction SilentlyContinue
     $apiHashPlain = $null
     $apiHashSecure = $null
     $apiIdInput = $null
     $databasePasswordPlain = $null
     $databasePasswordSecure = $null
+    $controlBotTokenPlain = $null
+    $controlBotTokenSecure = $null
+    $controlBotUserIdInput = $null
 }

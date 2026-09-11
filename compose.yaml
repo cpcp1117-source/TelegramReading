@@ -111,6 +111,44 @@ services:
       - no-new-privileges:true
     restart: "no"
 
+  control-bot:
+    profiles: ["control-bot"]
+    image: telegram-trader-phase4-control-bot:${APP_IMAGE_TAG:-phase4}
+    build:
+      context: .
+      target: runtime
+    command: ["python", "-m", "telegram_trader.control_bot"]
+    environment:
+      APP_ENVIRONMENT: control_bot
+      APP_DATABASE_HOST: db
+      APP_DATABASE_PORT: 5432
+      APP_DATABASE_NAME: telegram_trader
+      APP_DATABASE_USER: postgres
+      APP_DATABASE_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      APP_LOG_LEVEL: INFO
+      APP_SERVICE_NAME: control-bot
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID:-}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:-}
+      CONTROL_BOT_TOKEN: ${CONTROL_BOT_TOKEN:-}
+      CONTROL_BOT_ALLOWLISTED_USER_ID: ${CONTROL_BOT_ALLOWLISTED_USER_ID:-}
+      CONTROL_BOT_SESSION_PATH: secrets/telegram/control-bot
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./secrets:/app/secrets
+    networks:
+      - internal
+      - edge
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
 volumes:
   postgres_data:
 

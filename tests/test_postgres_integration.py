@@ -36,6 +36,8 @@ from telegram_trader.models import (
     MockMessageReceipt,
     OutboxDeliveryReceipt,
     OutboxEvent,
+    SignalDecisionEvent,
+    SignalDecisionRequest,
     TelegramCollectorCheckpoint,
     TelegramMessageVersion,
 )
@@ -45,6 +47,12 @@ from telegram_trader.normalize_content import NormalizationResult, run_normaliza
 from telegram_trader.outbox import OutboxConsumer
 from telegram_trader.parse_signals import SignalParsingResult, run_signal_parsing
 from telegram_trader.retention_cleanup import run_retention_cleanup
+from telegram_trader.signal_decisions import (
+    create_request,
+    load_pending_signals,
+    record_decision,
+    request_id_for_signal_row,
+)
 from telegram_trader.telegram_collector import TelethonReadOnlyCollector
 from telegram_trader.telegram_storage import (
     MediaStore,
@@ -64,6 +72,7 @@ def engine() -> Iterator[Engine]:
         connection.execute(
             text(
                 "TRUNCATE TABLE outbox_delivery_receipts, outbox_events, "
+                "signal_decision_events, signal_decision_requests, "
                 "normalized_signals, signal_parse_checkpoints, "
                 "normalized_content, telegram_message_versions, telegram_collector_checkpoints, "
                 "mock_message_receipts, consumer_checkpoints, audit_events, "
@@ -1334,6 +1343,315 @@ def test_run_signal_parsing_never_parses_analysis_channel(engine: Engine) -> Non
                 select(func.count())
                 .select_from(NormalizedSignalRow)
                 .where(NormalizedSignalRow.channel_id == 710)
+            )
+            == 0
+        )
+
+
+def _channel_policy_execution_signal(channel_id: int, **overrides: object) -> ChannelPolicy:
+    overrides.setdefault("channel_type", "EXECUTION_SIGNAL")
+    overrides.setdefault("symbol_scope_mode", "STATIC_ALLOWLIST")
+    overrides.setdefault("allowed_symbols", ["BTCUSDT"])
+    overrides.setdefault("automation_authorization", "GRANTED")
+    overrides.setdefault("gate_decision", "ENABLED")
+    return _channel_policy(channel_id=channel_id, topic_id=0, **overrides)
+
+
+def test_load_pending_signals_returns_latest_revision_without_existing_request(
+    engine: Engine,
+) -> None:
+    factory = create_session_factory(engine)
+    with factory.begin() as session:
+        session.add(_channel_policy_execution_signal(800))
+    _run_pipeline(factory, 800, message_id=1, text="BTC 多 市價進場")
+    run_signal_parsing(factory)
+
+    with factory() as session:
+        pending = load_pending_signals(session)
+
+    assert [row.channel_id for row in pending] == [800]
+
+
+def test_create_request_then_load_pending_excludes_it(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    with factory.begin() as session:
+        session.add(_channel_policy_execution_signal(801))
+    _run_pipeline(factory, 801, message_id=1, text="BTC 多 市價進場")
+    run_signal_parsing(factory)
+
+    with factory.begin() as session:
+        (signal,) = load_pending_signals(session)
+        create_request(session, signal, nonce="nonce-1", telegram_message_id=42)
+
+    with factory() as session:
+        assert load_pending_signals(session) == []
+        request = session.get(
+            SignalDecisionRequest, request_id_for_signal_row(signal.signal_row_id)
+        )
+        assert request is not None
+        assert request.telegram_message_id == 42
+        assert request.expires_at == signal.expires_at
+
+
+# One hour after `_telegram_input`'s default fixed `source_date` (2026-09-06
+# 08:00) -- safely inside the signal's 24h `expires_at` window regardless of
+# the real wall-clock date the test suite happens to run on.
+SIGNAL_FIXTURE_NOW = datetime(2026, 9, 6, 9, 0, tzinfo=UTC)
+
+
+def _create_signal_and_request(factory, channel_id: int, text: str = "BTC 多 市價進場"):  # type: ignore[no-untyped-def]
+    with factory.begin() as session:
+        session.add(_channel_policy_execution_signal(channel_id))
+    _run_pipeline(factory, channel_id, message_id=1, text=text)
+    run_signal_parsing(factory)
+    with factory.begin() as session:
+        (signal,) = load_pending_signals(session)
+        create_request(session, signal, nonce="nonce-1", telegram_message_id=42)
+        request_id = request_id_for_signal_row(signal.signal_row_id)
+    return request_id
+
+
+def test_record_decision_approved_happy_path(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    request_id = _create_signal_and_request(factory, 802)
+
+    with factory.begin() as session:
+        outcome = record_decision(
+            session,
+            request_id=request_id,
+            actor_user_id=555,
+            callback_query_id="cbq-1",
+            action="APPROVE",
+            now=SIGNAL_FIXTURE_NOW,
+        )
+
+    assert outcome == "APPROVED"
+
+
+def test_record_decision_rejected_happy_path(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    request_id = _create_signal_and_request(factory, 803)
+
+    with factory.begin() as session:
+        outcome = record_decision(
+            session,
+            request_id=request_id,
+            actor_user_id=555,
+            callback_query_id="cbq-1",
+            action="REJECT",
+            now=SIGNAL_FIXTURE_NOW,
+        )
+
+    assert outcome == "REJECTED"
+
+
+def test_record_decision_stale_when_already_decided(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    request_id = _create_signal_and_request(factory, 804)
+    with factory.begin() as session:
+        record_decision(
+            session,
+            request_id=request_id,
+            actor_user_id=555,
+            callback_query_id="cbq-1",
+            action="APPROVE",
+            now=SIGNAL_FIXTURE_NOW,
+        )
+
+    with factory.begin() as session:
+        second_outcome = record_decision(
+            session,
+            request_id=request_id,
+            actor_user_id=555,
+            callback_query_id="cbq-2",
+            action="APPROVE",
+            now=SIGNAL_FIXTURE_NOW,
+        )
+
+    assert second_outcome == "REJECTED_STALE"
+
+
+def test_record_decision_stale_when_newer_revision_exists(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    now = datetime(2026, 9, 11, 8, 0, tzinfo=UTC)
+    with factory.begin() as session:
+        session.add(_channel_policy_execution_signal(805))
+    processor = TelegramMessageProcessor(
+        factory, MediaStore(Path("media")), frozenset({(805, None)})
+    )
+    processor.process(
+        _telegram_input(
+            channel_id=805, message_id=1, text="BTC 多 市價進場", source_date=now, received_at=now
+        )
+    )
+    run_normalization(factory)
+    run_signal_parsing(factory)
+    with factory.begin() as session:
+        (signal,) = load_pending_signals(session)
+        create_request(session, signal, nonce="nonce-1", telegram_message_id=42)
+        request_id = request_id_for_signal_row(signal.signal_row_id)
+
+    # A reply-cancel arrives after the request was created, superseding the revision.
+    processor.process(
+        _telegram_input(
+            channel_id=805,
+            message_id=2,
+            text="取消",
+            reply_to_message_id=1,
+            source_date=now + timedelta(minutes=1),
+            received_at=now + timedelta(minutes=1),
+        )
+    )
+    run_normalization(factory)
+    run_signal_parsing(factory)
+
+    with factory.begin() as session:
+        outcome = record_decision(
+            session,
+            request_id=request_id,
+            actor_user_id=555,
+            callback_query_id="cbq-1",
+            action="APPROVE",
+        )
+
+    assert outcome == "REJECTED_STALE"
+
+
+def test_record_decision_expired(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    request_id = _create_signal_and_request(factory, 806)
+
+    with factory.begin() as session:
+        request = session.get(SignalDecisionRequest, request_id)
+        assert request is not None
+        past_expiry = request.expires_at + timedelta(seconds=1)
+        outcome = record_decision(
+            session,
+            request_id=request_id,
+            actor_user_id=555,
+            callback_query_id="cbq-1",
+            action="APPROVE",
+            now=past_expiry,
+        )
+
+    assert outcome == "REJECTED_EXPIRED"
+
+
+def test_record_decision_idempotent_same_callback_query_id(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    request_id = _create_signal_and_request(factory, 807)
+
+    with factory.begin() as session:
+        first = record_decision(
+            session,
+            request_id=request_id,
+            actor_user_id=555,
+            callback_query_id="cbq-duplicate",
+            action="APPROVE",
+            now=SIGNAL_FIXTURE_NOW,
+        )
+    with factory.begin() as session:
+        second = record_decision(
+            session,
+            request_id=request_id,
+            actor_user_id=555,
+            callback_query_id="cbq-duplicate",
+            action="APPROVE",
+            now=SIGNAL_FIXTURE_NOW,
+        )
+
+    assert first == "APPROVED"
+    assert second == "APPROVED"
+    with factory() as session:
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(SignalDecisionEvent)
+                .where(SignalDecisionEvent.request_id == request_id)
+            )
+            == 1
+        )
+
+
+def test_record_decision_unknown_request_returns_none(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    with factory.begin() as session:
+        outcome = record_decision(
+            session,
+            request_id="does-not-exist",
+            actor_user_id=555,
+            callback_query_id="cbq-1",
+            action="APPROVE",
+        )
+
+    assert outcome is None
+
+
+def test_signal_decision_request_cannot_be_updated(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    _create_signal_and_request(factory, 808)
+
+    with engine.connect() as connection, pytest.raises(DBAPIError, match="append-only"):
+        connection.execute(text("UPDATE signal_decision_requests SET nonce='changed'"))
+
+
+def test_signal_decision_event_cannot_be_updated(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    request_id = _create_signal_and_request(factory, 809)
+    with factory.begin() as session:
+        record_decision(
+            session,
+            request_id=request_id,
+            actor_user_id=555,
+            callback_query_id="cbq-1",
+            action="APPROVE",
+        )
+
+    with engine.connect() as connection, pytest.raises(DBAPIError, match="append-only"):
+        connection.execute(text("UPDATE signal_decision_events SET outcome='REJECTED'"))
+
+
+def test_signal_decision_rows_cascade_delete_via_retention_cleanup(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    now = datetime(2026, 9, 11, 8, 0, tzinfo=UTC)
+    with factory.begin() as session:
+        session.add(_channel_policy_execution_signal(810, raw_retention_days=1))
+    processor = TelegramMessageProcessor(
+        factory, MediaStore(Path("media")), frozenset({(810, None)})
+    )
+    processor.process(
+        _telegram_input(
+            channel_id=810,
+            message_id=1,
+            text="BTC 多 市價進場",
+            source_date=now - timedelta(days=5),
+            received_at=now - timedelta(days=5),
+        )
+    )
+    run_normalization(factory)
+    run_signal_parsing(factory)
+    with factory.begin() as session:
+        (signal,) = load_pending_signals(session)
+        create_request(session, signal, nonce="nonce-1", telegram_message_id=42)
+        request_id = request_id_for_signal_row(signal.signal_row_id)
+    with factory.begin() as session:
+        record_decision(
+            session,
+            request_id=request_id,
+            actor_user_id=555,
+            callback_query_id="cbq-1",
+            action="APPROVE",
+        )
+
+    run_retention_cleanup(factory, MediaStore(Path("media")), now=lambda: now)
+
+    with factory() as session:
+        assert session.get(SignalDecisionRequest, request_id) is None
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(SignalDecisionEvent)
+                .where(SignalDecisionEvent.request_id == request_id)
             )
             == 0
         )

@@ -1,0 +1,355 @@
+from __future__ import annotations
+
+import asyncio
+import contextlib
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+
+import pytest
+
+from telegram_trader.control_bot import (
+    _NO_EXECUTION_MESSAGE,
+    _UNKNOWN_COMMAND_MESSAGE,
+    ControlBot,
+    decode_close_all_callback,
+    decode_signal_callback,
+    encode_close_all_callback,
+    encode_signal_callback,
+    format_signal_notification,
+    format_signals_list,
+    format_status,
+    generate_nonce,
+)
+from telegram_trader.models import NormalizedSignal
+
+NOW = datetime(2026, 9, 11, 8, 0, tzinfo=UTC)
+
+
+class FakeBotClient:
+    def __init__(self) -> None:
+        self.started_with_token: str | None = None
+        self.handlers: list[tuple[object, object]] = []
+        self.disconnected = False
+
+    async def start(self, bot_token: str) -> object:
+        self.started_with_token = bot_token
+        return self
+
+    def add_event_handler(self, callback: object, builder: object) -> None:
+        self.handlers.append((callback, builder))
+
+    def remove_event_handler(self, callback: object, builder: object) -> None:
+        self.handlers.remove((callback, builder))
+
+    async def run_until_disconnected(self) -> None:
+        return None
+
+    async def disconnect(self) -> None:
+        self.disconnected = True
+
+
+@dataclass
+class FakeEvent:
+    sender_id: int | None
+    raw_text: str | None = None
+    data: bytes | None = None
+    query_id: int = 1
+    replies: list[tuple[str, object]] = field(default_factory=list)
+    answers: list[tuple[str | None, bool]] = field(default_factory=list)
+    edits: list[tuple[str, object]] = field(default_factory=list)
+
+    async def reply(self, text: str, buttons: object = None) -> None:
+        self.replies.append((text, buttons))
+
+    async def answer(self, text: str | None = None, alert: bool = False) -> None:
+        self.answers.append((text, alert))
+
+    async def edit(self, text: str, buttons: object = None) -> None:
+        self.edits.append((text, buttons))
+
+    @property
+    def query(self) -> object:
+        return SimpleNamespace(id=self.query_id)
+
+
+def _make_bot(*, clock: Callable[[], datetime] | None = None) -> ControlBot:
+    return ControlBot(
+        FakeBotClient(),
+        session_factory=None,  # type: ignore[arg-type]
+        bot_token="placeholder",
+        allowlisted_user_id=555,
+        poll_interval_seconds=0.01,
+        clock=clock or (lambda: NOW),
+    )
+
+
+def _signal(**overrides: object) -> NormalizedSignal:
+    values: dict[str, object] = {
+        "signal_row_id": "row-1",
+        "signal_id": "sig-1",
+        "revision": 0,
+        "raw_message_id": "raw-1",
+        "normalizer_version": "v2",
+        "channel_id": 2439599598,
+        "topic_id": None,
+        "status": "NEW",
+        "symbol": "ARB",
+        "side": "SHORT",
+        "entry_type": "MARKET",
+        "entry_values": [],
+        "stop_value": None,
+        "stop_origin": "DEFAULT_ROE_30",
+        "take_profits": [],
+        "evidence_spans": {},
+        "link_method": None,
+        "parser_version": "v1",
+        "expires_at": NOW,
+    }
+    values.update(overrides)
+    return NormalizedSignal(**values)
+
+
+# --- pure encode/decode ---
+
+
+def test_signal_callback_round_trip() -> None:
+    encoded = encode_signal_callback("req-1", "nonce-1", "APPROVE")
+    assert decode_signal_callback(encoded) == ("req-1", "nonce-1", "APPROVE")
+
+
+def test_signal_callback_rejects_garbage() -> None:
+    assert decode_signal_callback(b"not-valid-data") is None
+    assert decode_signal_callback(b"signal:only:three") is None
+    assert decode_signal_callback(b"close_all:nonce:req:extra") is None
+
+
+def test_close_all_callback_round_trip() -> None:
+    encoded = encode_close_all_callback("nonce-1")
+    assert decode_close_all_callback(encoded) == "nonce-1"
+
+
+def test_close_all_callback_rejects_signal_data() -> None:
+    encoded = encode_signal_callback("req-1", "nonce-1", "APPROVE")
+    assert decode_close_all_callback(encoded) is None
+
+
+def test_generate_nonce_is_unique_and_nonempty() -> None:
+    first = generate_nonce()
+    second = generate_nonce()
+    assert first != second
+    assert len(first) > 0
+
+
+# --- formatting ---
+
+
+def test_format_signal_notification_flags_dynamic_scope() -> None:
+    text = format_signal_notification(_signal(status="NEW"))
+    assert "ARB" in text
+    assert "SHORT" in text
+    assert "尚未經市場資料驗證" in text
+
+
+def test_format_signal_notification_validated_has_no_dynamic_scope_warning() -> None:
+    text = format_signal_notification(_signal(status="VALIDATED", symbol="BTCUSDT"))
+    assert "尚未經市場資料驗證" not in text
+
+
+def test_format_signals_list_empty() -> None:
+    assert "沒有待處理" in format_signals_list([])
+
+
+def test_format_signals_list_counts_entries() -> None:
+    text = format_signals_list([_signal(), _signal(signal_row_id="row-2", signal_id="sig-2")])
+    assert "2" in text
+
+
+def test_format_status_reports_no_poll_yet() -> None:
+    assert "尚未執行過" in format_status(0, None)
+
+
+def test_format_status_reports_last_poll_time() -> None:
+    text = format_status(3, NOW)
+    assert "3" in text
+    assert NOW.isoformat() in text
+
+
+# --- allowlist enforcement (NFR-007: 100% rejection, no DB access needed) ---
+
+
+@pytest.mark.anyio
+async def test_on_message_silently_rejects_unauthorized_sender() -> None:
+    bot = _make_bot()
+    event = FakeEvent(sender_id=999, raw_text="/status")
+
+    await bot._on_message(event)
+
+    assert event.replies == []
+
+
+@pytest.mark.anyio
+async def test_on_callback_silently_rejects_unauthorized_sender() -> None:
+    bot = _make_bot()
+    event = FakeEvent(sender_id=999, data=encode_signal_callback("r", "n", "APPROVE"))
+
+    await bot._on_callback(event)
+
+    assert event.answers == []
+    assert event.edits == []
+
+
+@pytest.mark.anyio
+async def test_on_message_unknown_command_from_allowlisted_user_gets_help() -> None:
+    bot = _make_bot()
+    event = FakeEvent(sender_id=555, raw_text="/nonsense")
+
+    await bot._on_message(event)
+
+    assert event.replies == [(_UNKNOWN_COMMAND_MESSAGE, None)]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("command", ["/pause", "/resume", "/close"])
+async def test_on_message_stub_commands_explain_no_execution_component(command: str) -> None:
+    bot = _make_bot()
+    event = FakeEvent(sender_id=555, raw_text=command)
+
+    await bot._on_message(event)
+
+    assert event.replies == [(_NO_EXECUTION_MESSAGE, None)]
+
+
+@pytest.mark.anyio
+async def test_on_message_ignores_blank_text() -> None:
+    bot = _make_bot()
+    event = FakeEvent(sender_id=555, raw_text="   ")
+
+    await bot._on_message(event)
+
+    assert event.replies == []
+
+
+# --- close_all double confirmation ---
+
+
+@pytest.mark.anyio
+async def test_close_all_requires_confirmation_button() -> None:
+    bot = _make_bot()
+    command_event = FakeEvent(sender_id=555, raw_text="/close_all")
+
+    await bot._on_message(command_event)
+
+    assert len(command_event.replies) == 1
+    text, buttons = command_event.replies[0]
+    assert "二次確認" in text
+    assert buttons is not None
+
+
+@pytest.mark.anyio
+async def test_close_all_confirmation_within_window_succeeds() -> None:
+    clock_value = {"now": NOW}
+    bot = _make_bot(clock=lambda: clock_value["now"])
+    await bot._on_message(FakeEvent(sender_id=555, raw_text="/close_all"))
+    nonce = bot._pending_close_all_nonce
+    assert nonce is not None
+
+    callback_event = FakeEvent(sender_id=555, data=encode_close_all_callback(nonce))
+    await bot._on_callback(callback_event)
+
+    assert callback_event.edits == [(_NO_EXECUTION_MESSAGE, None)]
+    assert bot._pending_close_all_nonce is None
+
+
+@pytest.mark.anyio
+async def test_close_all_confirmation_after_window_is_rejected() -> None:
+    clock_value = {"now": NOW}
+    bot = _make_bot(clock=lambda: clock_value["now"])
+    await bot._on_message(FakeEvent(sender_id=555, raw_text="/close_all"))
+    nonce = bot._pending_close_all_nonce
+    assert nonce is not None
+    clock_value["now"] = NOW + timedelta(seconds=999)
+
+    callback_event = FakeEvent(sender_id=555, data=encode_close_all_callback(nonce))
+    await bot._on_callback(callback_event)
+
+    assert callback_event.edits == []
+    assert callback_event.answers and callback_event.answers[0][1] is True
+
+
+@pytest.mark.anyio
+async def test_close_all_confirmation_with_wrong_nonce_is_rejected() -> None:
+    bot = _make_bot()
+    await bot._on_message(FakeEvent(sender_id=555, raw_text="/close_all"))
+
+    callback_event = FakeEvent(sender_id=555, data=encode_close_all_callback("wrong-nonce"))
+    await bot._on_callback(callback_event)
+
+    assert callback_event.edits == []
+    assert callback_event.answers and callback_event.answers[0][1] is True
+
+
+@pytest.mark.anyio
+async def test_signal_callback_with_unknown_request_answers_without_crash() -> None:
+    bot = _make_bot()
+    # request_id "unknown" cannot exist without a DB, but the lookup path is
+    # exercised via record_decision's own integration tests; here we only
+    # confirm garbage callback data is rejected before any DB access.
+    event = FakeEvent(sender_id=555, data=b"garbage")
+
+    await bot._on_callback(event)
+
+    assert event.answers == [("無效的操作", True)]
+
+
+# --- background poll task lifecycle (mirrors test_telegram_collector.py's convention) ---
+
+
+@pytest.mark.anyio
+async def test_poll_signals_forever_retries_after_unexpected_error() -> None:
+    bot = _make_bot()
+    calls = {"count": 0}
+
+    async def flaky_notify() -> int:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise RuntimeError("synthetic failure")
+        return 0
+
+    bot.notify_pending_signals = flaky_notify  # type: ignore[method-assign]
+
+    task = asyncio.create_task(bot._poll_signals_forever())
+    for _ in range(200):
+        if calls["count"] >= 2:
+            break
+        await asyncio.sleep(0.01)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    assert calls["count"] >= 2
+
+
+@pytest.mark.anyio
+async def test_run_forever_cancels_poll_task_cleanly() -> None:
+    bot = _make_bot()
+
+    async def no_op_notify() -> int:
+        return 0
+
+    bot.notify_pending_signals = no_op_notify  # type: ignore[method-assign]
+
+    async def blocking_forever() -> None:
+        await asyncio.Event().wait()
+
+    bot.run_connection = blocking_forever  # type: ignore[method-assign]
+
+    before = asyncio.all_tasks()
+    task = asyncio.create_task(bot.run_forever())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    assert asyncio.all_tasks() - before == set()

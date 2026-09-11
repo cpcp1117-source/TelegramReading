@@ -450,3 +450,70 @@ class SignalParseCheckpoint(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
+
+
+class SignalDecisionRequest(Base):
+    """One immutable row per `normalized_signals` revision actually notified via Control Bot.
+
+    Created only *after* the Telegram send succeeds, so there is never a
+    placeholder row needing a later update -- `request_id` is derived from
+    `signal_row_id`, so a given revision is requested at most once.
+    `expires_at` inherits the underlying signal's own `expires_at`; Phase 4
+    has no live execution urgency to justify a separate, shorter countdown.
+    """
+
+    __tablename__ = "signal_decision_requests"
+    __table_args__ = (
+        UniqueConstraint("signal_row_id", name="uq_signal_decision_request_signal_row"),
+        Index("ix_signal_decision_request_signal_id", "signal_id"),
+    )
+
+    request_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    signal_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    signal_row_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("normalized_signals.signal_row_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    channel_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    topic_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    nonce: Mapped[str] = mapped_column(String(64), nullable=False)
+    telegram_message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class SignalDecisionEvent(Base):
+    """Append-only log of every decision attempt by the allowlisted actor against a request.
+
+    `event_id` is derived from `(request_id, telegram_callback_query_id)` --
+    Telegram's own callback-query ID is the natural idempotency key, since
+    Telegram may redeliver a button tap at-least-once. Only the allowlisted
+    actor's attempts reach this table; an unauthorized sender is rejected
+    and logged before anything is written (same convention as
+    `channel_policy.py`'s exclusion logging), so there is no
+    `actor_user_id` CHECK here -- the allowlist is runtime config, not data.
+    """
+
+    __tablename__ = "signal_decision_events"
+    __table_args__ = (
+        CheckConstraint(
+            "outcome IN ('APPROVED', 'REJECTED', 'REJECTED_STALE', 'REJECTED_EXPIRED')",
+            name="ck_signal_decision_event_outcome_valid",
+        ),
+        Index("ix_signal_decision_event_request_id", "request_id"),
+    )
+
+    event_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    request_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("signal_decision_requests.request_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    actor_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    outcome: Mapped[str] = mapped_column(String(20), nullable=False)
+    decided_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
