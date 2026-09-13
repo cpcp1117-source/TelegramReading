@@ -42,6 +42,7 @@ from telegram_trader.models import (
     MockMessageReceipt,
     OutboxDeliveryReceipt,
     OutboxEvent,
+    SignalDecisionEdit,
     SignalDecisionEvent,
     SignalDecisionRequest,
     TelegramCollectorCheckpoint,
@@ -56,7 +57,9 @@ from telegram_trader.outbox import OutboxConsumer
 from telegram_trader.parse_signals import SignalParsingResult, run_signal_parsing
 from telegram_trader.retention_cleanup import run_retention_cleanup
 from telegram_trader.signal_decisions import (
+    create_edit,
     create_request,
+    load_current_draft,
     load_pending_signals,
     record_decision,
     request_id_for_signal_row,
@@ -81,7 +84,7 @@ def engine() -> Iterator[Engine]:
         connection.execute(
             text(
                 "TRUNCATE TABLE outbox_delivery_receipts, outbox_events, "
-                "signal_decision_events, signal_decision_requests, "
+                "signal_decision_edits, signal_decision_events, signal_decision_requests, "
                 "normalized_signals, signal_parse_checkpoints, "
                 "thesis, thesis_extraction_checkpoints, "
                 "normalized_content, binance_symbol_snapshots, "
@@ -1771,6 +1774,160 @@ def test_signal_decision_event_cannot_be_updated(engine: Engine) -> None:
 
     with engine.connect() as connection, pytest.raises(DBAPIError, match="append-only"):
         connection.execute(text("UPDATE signal_decision_events SET outcome='REJECTED'"))
+
+
+# --- editable order drafts (stop-loss/take-profit) ---
+
+
+def test_load_current_draft_falls_back_to_original_signal_when_never_edited(
+    engine: Engine,
+) -> None:
+    factory = create_session_factory(engine)
+    request_id = _create_signal_and_request(
+        factory,
+        811,
+        text="BTC 多 市價進場 請大家耐心等待後續走勢確認並持續觀察 止損 59000 止盈 62000",
+    )
+
+    with factory() as session:
+        request = session.get(SignalDecisionRequest, request_id)
+        assert request is not None
+        draft = load_current_draft(session, request)
+
+    assert draft.stop_value == Decimal("59000")
+    assert draft.take_profits == [Decimal("62000")]
+
+
+def test_create_edit_stop_carries_forward_prior_take_profit_edit(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    request_id = _create_signal_and_request(factory, 812)
+
+    with factory.begin() as session:
+        request = session.get(SignalDecisionRequest, request_id)
+        assert request is not None
+        create_edit(session, request, field="TAKE_PROFIT", value=[Decimal("70000")])
+
+    with factory.begin() as session:
+        request = session.get(SignalDecisionRequest, request_id)
+        assert request is not None
+        draft = create_edit(session, request, field="STOP", value=Decimal("55000"))
+
+    assert draft.stop_value == Decimal("55000")
+    assert draft.take_profits == [Decimal("70000")]
+
+    with factory() as session:
+        request = session.get(SignalDecisionRequest, request_id)
+        assert request is not None
+        current = load_current_draft(session, request)
+    assert current.stop_value == Decimal("55000")
+    assert current.take_profits == [Decimal("70000")]
+
+
+def test_record_decision_uses_edited_draft_values(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    request_id = _create_signal_and_request(factory, 813)
+
+    with factory.begin() as session:
+        request = session.get(SignalDecisionRequest, request_id)
+        assert request is not None
+        create_edit(session, request, field="STOP", value=Decimal("58000"))
+
+    with factory.begin() as session:
+        record_decision(
+            session,
+            request_id=request_id,
+            actor_user_id=555,
+            callback_query_id="cbq-1",
+            action="APPROVE",
+            now=SIGNAL_FIXTURE_NOW,
+        )
+
+    with factory() as session:
+        event = session.scalar(
+            select(SignalDecisionEvent).where(SignalDecisionEvent.request_id == request_id)
+        )
+        assert event is not None
+        assert event.approved_stop_value == Decimal("58000")
+
+
+def test_record_decision_uses_original_values_when_never_edited(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    request_id = _create_signal_and_request(
+        factory,
+        814,
+        text="BTC 多 市價進場 請大家耐心等待後續走勢確認並持續觀察 止損 59000 止盈 62000",
+    )
+
+    with factory.begin() as session:
+        record_decision(
+            session,
+            request_id=request_id,
+            actor_user_id=555,
+            callback_query_id="cbq-1",
+            action="APPROVE",
+            now=SIGNAL_FIXTURE_NOW,
+        )
+
+    with factory() as session:
+        event = session.scalar(
+            select(SignalDecisionEvent).where(SignalDecisionEvent.request_id == request_id)
+        )
+        assert event is not None
+        assert event.approved_stop_value == Decimal("59000")
+        assert event.approved_take_profits == ["62000"]
+
+
+def test_signal_decision_edit_cannot_be_updated(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    request_id = _create_signal_and_request(factory, 815)
+    with factory.begin() as session:
+        request = session.get(SignalDecisionRequest, request_id)
+        assert request is not None
+        create_edit(session, request, field="STOP", value=Decimal("58000"))
+
+    with engine.connect() as connection, pytest.raises(DBAPIError, match="append-only"):
+        connection.execute(text("UPDATE signal_decision_edits SET stop_value=99999"))
+
+
+def test_signal_decision_edit_cascade_deletes_via_retention_cleanup(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    now = datetime(2026, 9, 11, 8, 0, tzinfo=UTC)
+    with factory.begin() as session:
+        session.add(_channel_policy_execution_signal(816, raw_retention_days=1))
+    processor = TelegramMessageProcessor(
+        factory, MediaStore(Path("media")), frozenset({(816, None)})
+    )
+    processor.process(
+        _telegram_input(
+            channel_id=816,
+            message_id=1,
+            text="BTC 多 市價進場",
+            source_date=now - timedelta(days=5),
+            received_at=now - timedelta(days=5),
+        )
+    )
+    run_normalization(factory)
+    run_signal_parsing(factory)
+    with factory.begin() as session:
+        (signal,) = load_pending_signals(session)
+        create_request(session, signal, nonce="nonce-1", telegram_message_id=42)
+        request_id = request_id_for_signal_row(signal.signal_row_id)
+    with factory.begin() as session:
+        request = session.get(SignalDecisionRequest, request_id)
+        assert request is not None
+        create_edit(session, request, field="STOP", value=Decimal("58000"))
+
+    run_retention_cleanup(factory, MediaStore(Path("media")), now=lambda: now)
+
+    with factory() as session:
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(SignalDecisionEdit)
+                .where(SignalDecisionEdit.request_id == request_id)
+            )
+            == 0
+        )
 
 
 def test_signal_decision_rows_cascade_delete_via_retention_cleanup(engine: Engine) -> None:

@@ -5,6 +5,7 @@ import contextlib
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import pytest
 
@@ -12,9 +13,12 @@ from telegram_trader.control_bot import (
     _NO_EXECUTION_MESSAGE,
     _UNKNOWN_COMMAND_MESSAGE,
     ControlBot,
+    _PendingEdit,
     decode_close_all_callback,
+    decode_edit_field_callback,
     decode_signal_callback,
     encode_close_all_callback,
+    encode_edit_field_callback,
     encode_signal_callback,
     format_signal_notification,
     format_signals_list,
@@ -22,6 +26,7 @@ from telegram_trader.control_bot import (
     generate_nonce,
 )
 from telegram_trader.models import NormalizedSignal
+from telegram_trader.signal_decisions import DraftValues
 
 NOW = datetime(2026, 9, 11, 8, 0, tzinfo=UTC)
 
@@ -145,6 +150,27 @@ def test_close_all_callback_rejects_signal_data() -> None:
     assert decode_close_all_callback(encoded) is None
 
 
+def test_edit_field_callback_round_trip_stop() -> None:
+    encoded = encode_edit_field_callback("nonce-1", "STOP")
+    assert len(encoded) <= 64
+    assert decode_edit_field_callback(encoded) == ("nonce-1", "STOP")
+
+
+def test_edit_field_callback_round_trip_take_profit_with_realistic_nonce() -> None:
+    encoded = encode_edit_field_callback(generate_nonce(), "TAKE_PROFIT")
+    assert len(encoded) <= 64
+    decoded = decode_edit_field_callback(encoded)
+    assert decoded is not None
+    assert decoded[1] == "TAKE_PROFIT"
+
+
+def test_edit_field_callback_rejects_garbage() -> None:
+    assert decode_edit_field_callback(b"not-valid-data") is None
+    assert decode_edit_field_callback(b"edit:only") is None
+    assert decode_edit_field_callback(b"edit:nonce:GARBAGE") is None
+    assert decode_edit_field_callback(b"signal:nonce:APPROVE") is None
+
+
 def test_generate_nonce_is_unique_and_nonempty() -> None:
     first = generate_nonce()
     second = generate_nonce()
@@ -165,6 +191,24 @@ def test_format_signal_notification_flags_dynamic_scope() -> None:
 def test_format_signal_notification_validated_has_no_dynamic_scope_warning() -> None:
     text = format_signal_notification(_signal(status="VALIDATED", symbol="BTCUSDT"))
     assert "尚未經市場資料驗證" not in text
+
+
+def test_format_signal_notification_shows_original_values_without_draft() -> None:
+    text = format_signal_notification(_signal(stop_value=Decimal("59000"), take_profits=["62000"]))
+    assert "59000" in text
+    assert "62000" in text
+    assert "已依你的修改顯示" not in text
+
+
+def test_format_signal_notification_shows_draft_values_and_marker() -> None:
+    draft = DraftValues(stop_value=Decimal("58000"), take_profits=[Decimal("63000")])
+    text = format_signal_notification(
+        _signal(stop_value=Decimal("59000"), take_profits=["62000"]), draft=draft
+    )
+    assert "58000" in text
+    assert "63000" in text
+    assert "59000" not in text
+    assert "已依你的修改顯示" in text
 
 
 def test_format_signals_list_empty() -> None:
@@ -311,6 +355,64 @@ async def test_signal_callback_with_unknown_request_answers_without_crash() -> N
     await bot._on_callback(event)
 
     assert event.answers == [("無效的操作", True)]
+
+
+# --- editable order drafts (stop-loss/take-profit) ---
+
+
+@pytest.mark.anyio
+async def test_on_message_pending_edit_invalid_format_replies_error_and_clears_state() -> None:
+    bot = _make_bot()
+    bot._pending_edit = _PendingEdit(
+        request_id="req-1", field="STOP", expires_at=NOW + timedelta(seconds=60)
+    )
+    event = FakeEvent(sender_id=555, raw_text="not-a-number")
+
+    await bot._on_message(event)
+
+    assert bot._pending_edit is None
+    assert len(event.replies) == 1
+    assert "格式錯誤" in event.replies[0][0]
+
+
+@pytest.mark.anyio
+async def test_on_message_pending_edit_rejects_non_positive_value() -> None:
+    bot = _make_bot()
+    bot._pending_edit = _PendingEdit(
+        request_id="req-1", field="STOP", expires_at=NOW + timedelta(seconds=60)
+    )
+    event = FakeEvent(sender_id=555, raw_text="-5")
+
+    await bot._on_message(event)
+
+    assert bot._pending_edit is None
+    assert "格式錯誤" in event.replies[0][0]
+
+
+@pytest.mark.anyio
+async def test_on_message_expired_pending_edit_falls_through_to_normal_dispatch() -> None:
+    clock_value = {"now": NOW}
+    bot = _make_bot(clock=lambda: clock_value["now"])
+    bot._pending_edit = _PendingEdit(
+        request_id="req-1", field="STOP", expires_at=NOW - timedelta(seconds=1)
+    )
+    event = FakeEvent(sender_id=555, raw_text="/nonsense")
+
+    await bot._on_message(event)
+
+    assert bot._pending_edit is None
+    assert event.replies == [(_UNKNOWN_COMMAND_MESSAGE, None)]
+
+
+@pytest.mark.anyio
+async def test_on_callback_unauthorized_sender_does_not_set_pending_edit() -> None:
+    bot = _make_bot()
+    event = FakeEvent(sender_id=999, data=encode_edit_field_callback("n", "STOP"))
+
+    await bot._on_callback(event)
+
+    assert bot._pending_edit is None
+    assert event.answers == []
 
 
 # --- background poll task lifecycle (mirrors test_telegram_collector.py's convention) ---

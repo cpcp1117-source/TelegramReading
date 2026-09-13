@@ -520,7 +520,42 @@ class SignalDecisionEvent(Base):
     )
     actor_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     outcome: Mapped[str] = mapped_column(String(20), nullable=False)
+    approved_stop_value: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    approved_take_profits: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
     decided_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class SignalDecisionEdit(Base):
+    """Append-only log of every stop-loss/take-profit edit made before a decision.
+
+    Not a partial diff: each row is a **full draft snapshot** (both fields,
+    even if only one was actually changed this time), so "the current
+    draft" is always just "the latest row by revision" for a given
+    `request_id` -- no merge logic needed. `revision` is scoped per
+    `request_id`, starting at 1 (mirrors `normalized_signals.revision`'s
+    per-aggregate numbering). If no edit row exists yet for a request, the
+    current draft is the original `NormalizedSignal`'s own
+    `stop_value`/`take_profits` -- see `signal_decisions.load_current_draft`.
+    """
+
+    __tablename__ = "signal_decision_edits"
+    __table_args__ = (
+        CheckConstraint("revision >= 1", name="ck_signal_decision_edit_revision_positive"),
+        UniqueConstraint("request_id", "revision", name="uq_signal_decision_edit_request_revision"),
+    )
+
+    edit_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    request_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("signal_decision_requests.request_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    stop_value: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    take_profits: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default="[]")
+    edited_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 

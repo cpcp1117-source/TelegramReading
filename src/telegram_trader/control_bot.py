@@ -5,7 +5,9 @@ import contextlib
 import logging
 import secrets
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from typing import Any, cast
 
 from sqlalchemy.orm import Session, sessionmaker
@@ -14,12 +16,16 @@ from telethon import Button, TelegramClient, events  # type: ignore[import-untyp
 from telegram_trader.config import Settings, get_settings
 from telegram_trader.db import create_db_engine, create_session_factory
 from telegram_trader.logging_config import configure_logging
-from telegram_trader.models import NormalizedSignal
+from telegram_trader.models import NormalizedSignal, SignalDecisionRequest
 from telegram_trader.signal_decisions import (
     DecisionAction,
     DecisionOutcome,
+    DraftValues,
+    EditableField,
+    create_edit,
     create_request,
     find_request_by_nonce,
+    load_current_draft,
     load_pending_signals,
     record_decision,
 )
@@ -31,7 +37,10 @@ LOGGER = logging.getLogger(__name__)
 _CALLBACK_SEP = ":"
 _CALLBACK_PREFIX_SIGNAL = "signal"
 _CALLBACK_PREFIX_CLOSE_ALL = "close_all"
+_CALLBACK_PREFIX_EDIT = "edit"
 _CLOSE_ALL_CONFIRM_WINDOW_SECONDS = 30
+_EDIT_REPLY_WINDOW_SECONDS = 120
+_EDIT_FIELD_LABELS: dict[EditableField, str] = {"STOP": "停損", "TAKE_PROFIT": "停利"}
 
 _NO_EXECUTION_MESSAGE = (
     "✅ 已收到指令，但目前系統沒有可控制的執行元件"
@@ -93,15 +102,55 @@ def decode_close_all_callback(data: bytes) -> str | None:
     return parts[1]
 
 
-def format_signal_notification(signal: NormalizedSignal) -> str:
+def encode_edit_field_callback(nonce: str, field: EditableField) -> bytes:
+    """`"edit:<nonce>:<STOP|TAKE_PROFIT>"` -- well under the 64-byte cap
+
+    (worst case ~44 bytes), same nonce-only resolution as the signal
+    callback above.
+    """
+    parts = (_CALLBACK_PREFIX_EDIT, nonce, field)
+    return _CALLBACK_SEP.join(parts).encode()
+
+
+def decode_edit_field_callback(data: bytes) -> tuple[str, EditableField] | None:
+    try:
+        text = data.decode()
+    except UnicodeDecodeError:
+        return None
+    parts = text.split(_CALLBACK_SEP)
+    if len(parts) != 3 or parts[0] != _CALLBACK_PREFIX_EDIT:
+        return None
+    _, nonce, field = parts
+    if field not in ("STOP", "TAKE_PROFIT"):
+        return None
+    return nonce, cast(EditableField, field)
+
+
+def format_signal_notification(
+    signal: NormalizedSignal, *, draft: DraftValues | None = None
+) -> str:
+    """`draft` is only ever passed after an edit -- the initial notification
+
+    always shows the parser's own unedited values.
+    """
+    stop_value = draft.stop_value if draft is not None else signal.stop_value
+    take_profits = (
+        draft.take_profits
+        if draft is not None
+        else [Decimal(str(value)) for value in signal.take_profits]
+    )
     lines = [
         "📡 新訊號待核准" if signal.status == "NEW" else "📡 訊號待核准",
         f"symbol: {signal.symbol or '(未知)'}",
         f"side: {signal.side or '(未知)'}",
         f"status: {signal.status}",
         f"entry_type: {signal.entry_type or '-'}",
+        f"stop_value: {stop_value if stop_value is not None else '-'}",
+        f"take_profits: {', '.join(str(tp) for tp in take_profits) if take_profits else '-'}",
         f"stop_origin: {signal.stop_origin}",
     ]
+    if draft is not None:
+        lines.append("✏️ 停損/停利已依你的修改顯示（尚未核准）。")
     if signal.status == "NEW":
         lines.append(
             "⚠️ symbol 尚未經市場資料驗證（動態範圍頻道），此核准僅供記錄，不會有任何自動下單。"
@@ -121,6 +170,26 @@ def format_signals_list(signals: Sequence[NormalizedSignal]) -> str:
 def format_status(pending_count: int, last_poll_at: datetime | None) -> str:
     poll_text = last_poll_at.isoformat() if last_poll_at else "尚未執行過"
     return f"待處理訊號：{pending_count} 筆\n上次掃描時間：{poll_text}"
+
+
+def _signal_decision_buttons(nonce: str) -> list[list[Any]]:
+    return [
+        [
+            Button.inline("✅ Approve", encode_signal_callback(nonce, "APPROVE")),
+            Button.inline("❌ Reject", encode_signal_callback(nonce, "REJECT")),
+        ],
+        [
+            Button.inline("✏️ 編輯停損", encode_edit_field_callback(nonce, "STOP")),
+            Button.inline("✏️ 編輯停利", encode_edit_field_callback(nonce, "TAKE_PROFIT")),
+        ],
+    ]
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingEdit:
+    request_id: str
+    field: EditableField
+    expires_at: datetime
 
 
 class ControlBot:
@@ -143,6 +212,7 @@ class ControlBot:
         self._last_poll_at: datetime | None = None
         self._pending_close_all_nonce: str | None = None
         self._pending_close_all_expires_at: datetime | None = None
+        self._pending_edit: _PendingEdit | None = None
 
     def _is_allowlisted(self, sender_id: int | None) -> bool:
         return sender_id is not None and sender_id == self._allowlisted_user_id
@@ -159,16 +229,10 @@ class ControlBot:
             pending = load_pending_signals(session)
             for signal in pending:
                 nonce = generate_nonce()
-                buttons = [
-                    [
-                        Button.inline("✅ Approve", encode_signal_callback(nonce, "APPROVE")),
-                        Button.inline("❌ Reject", encode_signal_callback(nonce, "REJECT")),
-                    ]
-                ]
                 message = await self._client.send_message(
                     self._allowlisted_user_id,
                     format_signal_notification(signal),
-                    buttons=buttons,
+                    buttons=_signal_decision_buttons(nonce),
                 )
                 create_request(session, signal, nonce=nonce, telegram_message_id=message.id)
                 session.commit()
@@ -204,6 +268,16 @@ class ControlBot:
         text = (getattr(event, "raw_text", None) or "").strip()
         if not text:
             return
+
+        pending_edit = self._pending_edit
+        if pending_edit is not None:
+            self._pending_edit = None
+            if self._clock() <= pending_edit.expires_at:
+                await self._apply_pending_edit(event, pending_edit, text)
+                return
+            # Expired: fall through to normal command dispatch below so a
+            # stale reply is never misinterpreted as an edit value.
+
         command = text.split()[0].lower().split("@")[0]
 
         if command == "/status":
@@ -229,6 +303,37 @@ class ControlBot:
         else:
             await event.reply(_UNKNOWN_COMMAND_MESSAGE)
 
+    async def _apply_pending_edit(self, event: Any, pending: _PendingEdit, text: str) -> None:
+        try:
+            value = Decimal(text.strip())
+            if value <= 0:
+                raise InvalidOperation("value must be positive")
+        except InvalidOperation:
+            await event.reply("⚠️ 格式錯誤，請輸入正數數字，或重新點擊編輯按鈕。")
+            return
+
+        with self._session_factory.begin() as session:
+            request = session.get(SignalDecisionRequest, pending.request_id)
+            if request is None:
+                signal = None
+                draft = None
+                nonce = None
+            else:
+                new_value: Decimal | list[Decimal] = value if pending.field == "STOP" else [value]
+                draft = create_edit(session, request, field=pending.field, value=new_value)
+                signal = session.get(NormalizedSignal, request.signal_row_id)
+                nonce = request.nonce
+
+        if signal is None or draft is None or nonce is None:
+            await event.reply("⚠️ 找不到這個請求，可能已經過期或被清除，請重新查看 /signals。")
+            return
+
+        label = _EDIT_FIELD_LABELS[pending.field]
+        await event.reply(
+            f"✅ 已更新{label}草稿。\n\n{format_signal_notification(signal, draft=draft)}",
+            buttons=_signal_decision_buttons(nonce),
+        )
+
     async def _on_callback(self, event: Any) -> None:
         if not self._is_allowlisted(event.sender_id):
             LOGGER.warning(
@@ -252,6 +357,33 @@ class ControlBot:
                 await event.answer()
             else:
                 await event.answer("已過期或無效，請重新輸入 /close_all", alert=True)
+            return
+
+        edit_decoded = decode_edit_field_callback(data)
+        if edit_decoded is not None:
+            edit_nonce, field = edit_decoded
+            with self._session_factory() as session:
+                request = find_request_by_nonce(session, edit_nonce)
+                draft = load_current_draft(session, request) if request is not None else None
+            if request is None or draft is None:
+                await event.answer("找不到這個請求", alert=True)
+                return
+            self._pending_edit = _PendingEdit(
+                request_id=request.request_id,
+                field=field,
+                expires_at=self._clock() + timedelta(seconds=_EDIT_REPLY_WINDOW_SECONDS),
+            )
+            label = _EDIT_FIELD_LABELS[field]
+            current_value = (
+                draft.stop_value
+                if field == "STOP"
+                else (", ".join(str(tp) for tp in draft.take_profits) or None)
+            )
+            await event.answer()
+            await event.reply(
+                f"目前{label}為 {current_value if current_value is not None else '-'}。"
+                f"請在 {_EDIT_REPLY_WINDOW_SECONDS} 秒內回覆新的{label}數值（純數字）。"
+            )
             return
 
         decoded = decode_signal_callback(data)

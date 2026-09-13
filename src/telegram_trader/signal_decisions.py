@@ -1,17 +1,31 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Literal, cast
 
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from telegram_trader.models import NormalizedSignal, SignalDecisionEvent, SignalDecisionRequest
+from telegram_trader.models import (
+    NormalizedSignal,
+    SignalDecisionEdit,
+    SignalDecisionEvent,
+    SignalDecisionRequest,
+)
 
 DecisionAction = Literal["APPROVE", "REJECT"]
 DecisionOutcome = Literal["APPROVED", "REJECTED", "REJECTED_STALE", "REJECTED_EXPIRED"]
+EditableField = Literal["STOP", "TAKE_PROFIT"]
+
+
+@dataclass(frozen=True, slots=True)
+class DraftValues:
+    stop_value: Decimal | None
+    take_profits: list[Decimal]
 
 
 def request_id_for_signal_row(signal_row_id: str) -> str:
@@ -94,6 +108,78 @@ def find_request_by_nonce(session: Session, nonce: str) -> SignalDecisionRequest
     return session.scalar(select(SignalDecisionRequest).where(SignalDecisionRequest.nonce == nonce))
 
 
+def load_current_draft(session: Session, request: SignalDecisionRequest) -> DraftValues:
+    """The latest edit for this request, or the original signal's own values if never edited.
+
+    `signal_decision_edits` stores a full snapshot per row (not a partial
+    diff), so "current draft" is always just the latest row by revision --
+    no merge logic needed here.
+    """
+    latest_edit = session.scalar(
+        select(SignalDecisionEdit)
+        .where(SignalDecisionEdit.request_id == request.request_id)
+        .order_by(SignalDecisionEdit.revision.desc())
+        .limit(1)
+    )
+    if latest_edit is not None:
+        return DraftValues(
+            stop_value=latest_edit.stop_value,
+            take_profits=[Decimal(str(value)) for value in latest_edit.take_profits],
+        )
+    signal = session.get(NormalizedSignal, request.signal_row_id)
+    if signal is None:
+        return DraftValues(stop_value=None, take_profits=[])
+    return DraftValues(
+        stop_value=signal.stop_value,
+        take_profits=[Decimal(str(value)) for value in signal.take_profits],
+    )
+
+
+def create_edit(
+    session: Session,
+    request: SignalDecisionRequest,
+    *,
+    field: EditableField,
+    value: Decimal | list[Decimal],
+) -> DraftValues:
+    """Append one full-draft-snapshot edit row, carrying the untouched field forward.
+
+    Editing `TAKE_PROFIT` replaces the whole take-profit list with the
+    single new value the user typed -- matching the confirmed "reply with
+    one new number" interaction, not a multi-value syntax.
+    """
+    current = load_current_draft(session, request)
+    new_stop_value: Decimal | None
+    new_take_profits: list[Decimal]
+    if field == "STOP":
+        assert isinstance(value, Decimal)
+        new_stop_value = value
+        new_take_profits = current.take_profits
+    else:
+        assert isinstance(value, list)
+        new_stop_value = current.stop_value
+        new_take_profits = value
+
+    next_revision = (
+        session.scalar(
+            select(func.max(SignalDecisionEdit.revision)).where(
+                SignalDecisionEdit.request_id == request.request_id
+            )
+        )
+        or 0
+    ) + 1
+    session.add(
+        SignalDecisionEdit(
+            edit_id=hashlib.sha256(f"{request.request_id}:{next_revision}".encode()).hexdigest(),
+            request_id=request.request_id,
+            revision=next_revision,
+            stop_value=new_stop_value,
+            take_profits=[str(tp) for tp in new_take_profits],
+        )
+    )
+    return DraftValues(stop_value=new_stop_value, take_profits=new_take_profits)
+
+
 def _is_current_revision(session: Session, request: SignalDecisionRequest) -> bool:
     max_revision = session.scalar(
         select(func.max(NormalizedSignal.revision)).where(
@@ -159,6 +245,7 @@ def record_decision(
     else:
         outcome = "APPROVED" if action == "APPROVE" else "REJECTED"
 
+    draft = load_current_draft(session, request)
     session.execute(
         pg_insert(SignalDecisionEvent)
         .values(
@@ -166,6 +253,8 @@ def record_decision(
             request_id=request_id,
             actor_user_id=actor_user_id,
             outcome=outcome,
+            approved_stop_value=draft.stop_value,
+            approved_take_profits=[str(tp) for tp in draft.take_profits],
             decided_at=moment,
         )
         .on_conflict_do_nothing(index_elements=["event_id"])
