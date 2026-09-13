@@ -126,6 +126,22 @@ def decode_edit_field_callback(data: bytes) -> tuple[str, EditableField] | None:
     return nonce, cast(EditableField, field)
 
 
+def _format_decimal(value: Decimal) -> str:
+    """Fixed-point, trailing-zeros-stripped display -- never scientific notation.
+
+    Postgres's `Numeric(20, 8)` column pads a stored value out to its full
+    declared scale on read-back (e.g. `10` -> `Decimal("10.00000000")`), so
+    the same logical value can otherwise print differently depending on
+    whether it was just typed (in-memory, unrounded) or round-tripped
+    through the database (carried forward from a prior edit) -- a real
+    inconsistency caught via live testing, not just a style preference.
+    """
+    text = f"{value:f}"
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
 def format_signal_notification(
     signal: NormalizedSignal, *, draft: DraftValues | None = None
 ) -> str:
@@ -145,8 +161,11 @@ def format_signal_notification(
         f"side: {signal.side or '(未知)'}",
         f"status: {signal.status}",
         f"entry_type: {signal.entry_type or '-'}",
-        f"stop_value: {stop_value if stop_value is not None else '-'}",
-        f"take_profits: {', '.join(str(tp) for tp in take_profits) if take_profits else '-'}",
+        f"stop_value: {_format_decimal(stop_value) if stop_value is not None else '-'}",
+        (
+            "take_profits: "
+            + (", ".join(_format_decimal(tp) for tp in take_profits) if take_profits else "-")
+        ),
         f"stop_origin: {signal.stop_origin}",
     ]
     if draft is not None:
@@ -374,11 +393,12 @@ class ControlBot:
                 expires_at=self._clock() + timedelta(seconds=_EDIT_REPLY_WINDOW_SECONDS),
             )
             label = _EDIT_FIELD_LABELS[field]
-            current_value = (
-                draft.stop_value
-                if field == "STOP"
-                else (", ".join(str(tp) for tp in draft.take_profits) or None)
-            )
+            if field == "STOP":
+                current_value = (
+                    _format_decimal(draft.stop_value) if draft.stop_value is not None else None
+                )
+            else:
+                current_value = ", ".join(_format_decimal(tp) for tp in draft.take_profits) or None
             await event.answer()
             await event.reply(
                 f"目前{label}為 {current_value if current_value is not None else '-'}。"

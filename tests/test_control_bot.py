@@ -13,6 +13,7 @@ from telegram_trader.control_bot import (
     _NO_EXECUTION_MESSAGE,
     _UNKNOWN_COMMAND_MESSAGE,
     ControlBot,
+    _format_decimal,
     _PendingEdit,
     decode_close_all_callback,
     decode_edit_field_callback,
@@ -191,6 +192,28 @@ def test_format_signal_notification_flags_dynamic_scope() -> None:
 def test_format_signal_notification_validated_has_no_dynamic_scope_warning() -> None:
     text = format_signal_notification(_signal(status="VALIDATED", symbol="BTCUSDT"))
     assert "尚未經市場資料驗證" not in text
+
+
+def test_format_decimal_strips_trailing_zeros_without_scientific_notation() -> None:
+    """Postgres's Numeric(20,8) pads a stored value to full scale on read-back
+
+    (e.g. `10` -> `Decimal("10.00000000")`) -- caught via live testing as a
+    real display inconsistency between a freshly-typed value and one
+    carried forward through the database. This must render identically.
+    """
+    assert _format_decimal(Decimal("10.00000000")) == "10"
+    assert _format_decimal(Decimal("10")) == "10"
+    assert _format_decimal(Decimal("58000.50000000")) == "58000.5"
+    assert _format_decimal(Decimal("0.00000000")) == "0"
+
+
+def test_format_signal_notification_strips_trailing_zeros_from_decimal() -> None:
+    text = format_signal_notification(
+        _signal(stop_value=Decimal("10.00000000"), take_profits=["20.00000000"])
+    )
+    assert "stop_value: 10\n" in text
+    assert "10.00000000" not in text
+    assert "take_profits: 20\n" in text
 
 
 def test_format_signal_notification_shows_original_values_without_draft() -> None:
