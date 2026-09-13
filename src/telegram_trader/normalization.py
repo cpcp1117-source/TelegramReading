@@ -8,7 +8,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
-CURRENT_NORMALIZER_VERSION = "v3"
+# Bumped v3 -> v4: the real backlog's v3 pass ran before binance_symbol_snapshots
+# had any row in it yet (an operational sequencing mistake -- migration 0011 was
+# applied after, not before, the v3 run), so the entire backlog is stuck at
+# PENDING_MARKET_DATA under v3 with no way to revisit it (normalized_content is
+# append-only per version). This bump forces one more full reprocess, this time
+# with a real snapshot already in place.
+CURRENT_NORMALIZER_VERSION = "v4"
 
 SymbolStatus = Literal["VALID", "INVALID", "PENDING_MARKET_DATA"]
 MediaReviewStatus = Literal["NOT_APPLICABLE", "PENDING_MANUAL_REVIEW"]
