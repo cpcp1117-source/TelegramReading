@@ -548,3 +548,117 @@ class BinanceSymbolSnapshot(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class Thesis(Base):
+    """A schema-valid ANALYSIS proposition extracted from one `normalized_content` row (FR-012).
+
+    `thesis_row_id` is this row's own identity, derived from
+    `(content_id, extraction_schema_version, llm_model)` -- idempotent
+    re-extraction, and a schema/prompt/model change appends fresh rows
+    rather than overwriting old ones (same convention as `NormalizedContent`/
+    `NormalizedSignal`). `thesis_id` is the separate, stable *aggregate*
+    identity a later Strategy Contract/Market Confirmation slice will reuse
+    across lifecycle revisions; this slice always writes `revision=0` and
+    never produces anything beyond `DRAFT`/`INSUFFICIENT_DATA` -- `status`'s
+    CHECK constraint is deliberately narrower than the full
+    `DRAFT/MONITORING/CONFIRMED/INVALIDATED/EXPIRED/INSUFFICIENT_DATA`
+    lifecycle for that reason (P3-MAJOR-004 was exactly about columns
+    nothing consumes yet; this avoids declaring lifecycle states no code
+    produces or checks). `media_included` is always `False` in this slice
+    (BR-003): only `source_text_included` is ever sent to the LLM, never
+    the chart image.
+    """
+
+    __tablename__ = "thesis"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('DRAFT', 'INSUFFICIENT_DATA')",
+            name="ck_thesis_status_valid",
+        ),
+        CheckConstraint(
+            "primary_direction IN ('BULLISH', 'BEARISH', 'NEUTRAL')",
+            name="ck_thesis_primary_direction_valid",
+        ),
+        CheckConstraint(
+            "confidence_status IN ('HIGH', 'MEDIUM', 'LOW', 'INSUFFICIENT_DATA')",
+            name="ck_thesis_confidence_status_valid",
+        ),
+        CheckConstraint("revision >= 0", name="ck_thesis_revision_non_negative"),
+        UniqueConstraint(
+            "content_id",
+            "extraction_schema_version",
+            "llm_model",
+            name="uq_thesis_content_extraction",
+        ),
+        UniqueConstraint(
+            "thesis_id",
+            "revision",
+            "extraction_schema_version",
+            "llm_model",
+            name="uq_thesis_id_revision",
+        ),
+        Index("ix_thesis_channel_topic", "channel_id", "topic_id"),
+        Index("ix_thesis_thesis_id", "thesis_id"),
+    )
+
+    thesis_row_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    thesis_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    content_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("normalized_content.content_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    channel_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    topic_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    extraction_schema_version: Mapped[str] = mapped_column(String(20), nullable=False)
+    llm_model: Mapped[str] = mapped_column(String(100), nullable=False)
+    llm_schema_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    primary_direction: Mapped[str] = mapped_column(String(10), nullable=False)
+    confidence_status: Mapped[str] = mapped_column(String(20), nullable=False)
+    evidence_quotes: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default="[]")
+    conditions: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default="[]"
+    )
+    source_text_included: Mapped[str] = mapped_column(Text, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    media_included: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    raw_llm_response: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class ThesisExtractionCheckpoint(Base):
+    """Progress cursor for `extract_theses.py`, keyed by
+
+    `(channel_id, topic_id, extraction_schema_version, llm_model)`.
+
+    Same rationale as `SignalParseCheckpoint`: a `normalized_content` row
+    may legitimately produce no `thesis` row at all (unauthorized, no
+    resolvable symbol, or a provider/validation failure), so "row exists"
+    idempotency alone would re-select and re-attempt those same rows
+    forever. The cursor is a `(created_at, content_id)` pair so ties on an
+    identical `created_at` are still ordered deterministically. A schema or
+    model change starts a fresh cursor (new PK), naturally reprocessing full
+    history under the new version without disturbing the old version's
+    checkpoint or its rows.
+    """
+
+    __tablename__ = "thesis_extraction_checkpoints"
+    __table_args__ = (
+        CheckConstraint("channel_id > 0", name="ck_thesis_extraction_checkpoint_channel_positive"),
+        CheckConstraint("topic_id >= 0", name="ck_thesis_extraction_checkpoint_topic_non_negative"),
+    )
+
+    channel_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    topic_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, server_default="0")
+    extraction_schema_version: Mapped[str] = mapped_column(String(20), primary_key=True)
+    llm_model: Mapped[str] = mapped_column(String(100), primary_key=True)
+    last_created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_content_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )

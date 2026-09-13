@@ -49,7 +49,9 @@ from telegram_trader.models import (
 )
 from telegram_trader.models import NormalizedContent as NormalizedContentRow
 from telegram_trader.models import NormalizedSignal as NormalizedSignalRow
+from telegram_trader.models import Thesis as ThesisRow
 from telegram_trader.normalize_content import NormalizationResult, run_normalization
+from telegram_trader.openai_client import OpenAiClientError
 from telegram_trader.outbox import OutboxConsumer
 from telegram_trader.parse_signals import SignalParsingResult, run_signal_parsing
 from telegram_trader.retention_cleanup import run_retention_cleanup
@@ -65,6 +67,7 @@ from telegram_trader.telegram_storage import (
     TelegramMessageInput,
     TelegramMessageProcessor,
 )
+from telegram_trader.thesis_extraction import ThesisExtractionResult, run_thesis_extraction
 
 pytestmark = pytest.mark.integration
 
@@ -80,6 +83,7 @@ def engine() -> Iterator[Engine]:
                 "TRUNCATE TABLE outbox_delivery_receipts, outbox_events, "
                 "signal_decision_events, signal_decision_requests, "
                 "normalized_signals, signal_parse_checkpoints, "
+                "thesis, thesis_extraction_checkpoints, "
                 "normalized_content, binance_symbol_snapshots, "
                 "telegram_message_versions, telegram_collector_checkpoints, "
                 "mock_message_receipts, consumer_checkpoints, audit_events, "
@@ -1813,3 +1817,281 @@ def test_signal_decision_rows_cascade_delete_via_retention_cleanup(engine: Engin
             )
             == 0
         )
+
+
+# --- Phase 5 Slice 2a: Thesis extraction ---
+
+
+def _channel_policy_analysis(channel_id: int, **overrides: object) -> ChannelPolicy:
+    overrides.setdefault("channel_type", "ANALYSIS")
+    overrides.setdefault("symbol_scope_mode", "STATIC_ALLOWLIST")
+    overrides.setdefault("allowed_symbols", ["BTCUSDT"])
+    overrides.setdefault("automation_authorization", "GRANTED")
+    overrides.setdefault("ai_authorization", "GRANTED")
+    overrides.setdefault("media_authorization", "GRANTED")
+    overrides.setdefault("gate_decision", "MONITOR_ONLY")
+    return _channel_policy(channel_id=channel_id, topic_id=0, **overrides)
+
+
+_THESIS_SOURCE_TEXT = "BTC 若跌破773將測試760-756支撐"
+
+
+def _thesis_response(**overrides: object) -> dict[str, object]:
+    values: dict[str, object] = {
+        "primary_direction": "NEUTRAL",
+        "confidence_status": "HIGH",
+        "evidence_quotes": ["若跌破773將測試760-756支撐"],
+        "conditions": [
+            {
+                "comparator": "BELOW",
+                "trigger_price": "773",
+                "symbol": "BTCUSDT",
+                "invalidates_thesis": True,
+                "implication_direction": "DOWN",
+                "target_zone_low": "756",
+                "target_zone_high": "760",
+                "evidence_quote": "若跌破773將測試760-756支撐",
+            }
+        ],
+    }
+    values.update(overrides)
+    return values
+
+
+class _FakeOpenAiClient:
+    """Implements only `extract_structured`, matching the project's FakeXClient convention."""
+
+    def __init__(self, responses: list[object] | None = None) -> None:
+        self._responses = list(responses) if responses is not None else None
+        self.calls: list[dict[str, object]] = []
+
+    def extract_structured(
+        self,
+        *,
+        model: str,
+        system_prompt: str,
+        user_content: str,
+        json_schema: dict[str, object],
+        schema_name: str,
+    ) -> dict[str, object]:
+        self.calls.append(
+            {"model": model, "user_content": user_content, "schema_name": schema_name}
+        )
+        if self._responses is not None:
+            response = self._responses.pop(0)
+            if isinstance(response, Exception):
+                raise response
+            assert isinstance(response, dict)
+            return response
+        return _thesis_response()
+
+
+def _seed_thesis_candidate(  # type: ignore[no-untyped-def]
+    factory, channel_id: int, *, text: str = _THESIS_SOURCE_TEXT, with_media: bool = False
+) -> None:
+    processor = TelegramMessageProcessor(
+        factory, MediaStore(Path("media")), frozenset({(channel_id, None)})
+    )
+    overrides: dict[str, object] = {"channel_id": channel_id, "message_id": 1, "text": text}
+    if with_media:
+        overrides.update(
+            content_type="caption",
+            media_bytes=b"fake-chart-bytes",
+            media_filename="chart.png",
+            media_mime_type="image/png",
+        )
+    processor.process(_telegram_input(**overrides))
+    run_normalization(factory)
+
+
+def test_run_thesis_extraction_happy_path(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    with factory.begin() as session:
+        session.add(_channel_policy_analysis(900))
+    _seed_thesis_candidate(factory, 900)
+    client = _FakeOpenAiClient()
+
+    results = run_thesis_extraction(factory, client, model="gpt-4o-mini")
+
+    assert results == [
+        ThesisExtractionResult(channel_id=900, topic_id=0, processed_count=1, skipped_count=0)
+    ]
+    assert len(client.calls) == 1
+    assert client.calls[0]["user_content"] == _THESIS_SOURCE_TEXT
+    with factory() as session:
+        row = session.scalar(select(ThesisRow))
+        assert row is not None
+        assert row.status == "DRAFT"
+        assert row.primary_direction == "NEUTRAL"
+        assert row.media_included is False
+        assert row.conditions[0]["trigger_price"] == "773"
+
+
+def test_run_thesis_extraction_zero_calls_when_ai_authorization_revoked(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    with factory.begin() as session:
+        session.add(_channel_policy_analysis(901, ai_authorization="REVOKED"))
+    _seed_thesis_candidate(factory, 901)
+    client = _FakeOpenAiClient()
+
+    results = run_thesis_extraction(factory, client, model="gpt-4o-mini")
+
+    assert results == []
+    assert client.calls == []
+    with factory() as session:
+        assert session.scalar(select(func.count()).select_from(ThesisRow)) == 0
+
+
+def test_run_thesis_extraction_zero_calls_when_media_blocked(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    with factory.begin() as session:
+        session.add(_channel_policy_analysis(902, media_authorization="REVOKED"))
+    _seed_thesis_candidate(factory, 902, with_media=True)
+    client = _FakeOpenAiClient()
+
+    with factory() as session:
+        seeded = session.scalar(select(NormalizedContentRow))
+        assert seeded is not None and seeded.media_review_status == "PENDING_MANUAL_REVIEW"
+
+    results = run_thesis_extraction(factory, client, model="gpt-4o-mini")
+
+    assert results[0].processed_count == 0
+    assert results[0].skipped_count == 1
+    assert client.calls == []
+
+
+def test_run_thesis_extraction_media_authorization_granted_allows_processing(
+    engine: Engine,
+) -> None:
+    factory = create_session_factory(engine)
+    with factory.begin() as session:
+        session.add(_channel_policy_analysis(903, media_authorization="GRANTED"))
+    _seed_thesis_candidate(factory, 903, with_media=True)
+    client = _FakeOpenAiClient()
+
+    with factory() as session:
+        seeded = session.scalar(select(NormalizedContentRow))
+        assert seeded is not None and seeded.media_review_status == "PENDING_MANUAL_REVIEW"
+
+    results = run_thesis_extraction(factory, client, model="gpt-4o-mini")
+
+    assert results[0].processed_count == 1
+    assert len(client.calls) == 1
+    assert "chart.png" not in client.calls[0]["user_content"]  # type: ignore[operator]
+    with factory() as session:
+        row = session.scalar(select(ThesisRow))
+        assert row is not None
+        assert row.media_included is False
+
+
+def test_run_thesis_extraction_skips_message_without_valid_symbol(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    with factory.begin() as session:
+        session.add(_channel_policy_analysis(904))
+    _seed_thesis_candidate(factory, 904, text="今天是個好日子，適合觀望")  # noqa: RUF001
+    client = _FakeOpenAiClient()
+
+    results = run_thesis_extraction(factory, client, model="gpt-4o-mini")
+
+    assert results[0].processed_count == 0
+    assert results[0].skipped_count == 1
+    assert client.calls == []
+
+
+def test_run_thesis_extraction_malformed_response_persists_nothing(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    with factory.begin() as session:
+        session.add(_channel_policy_analysis(905))
+    _seed_thesis_candidate(factory, 905)
+    client = _FakeOpenAiClient(responses=[_thesis_response(primary_direction="SIDEWAYS")])
+
+    results = run_thesis_extraction(factory, client, model="gpt-4o-mini")
+
+    assert results[0].processed_count == 0
+    assert results[0].skipped_count == 1
+    with factory() as session:
+        assert session.scalar(select(func.count()).select_from(ThesisRow)) == 0
+
+
+def test_run_thesis_extraction_openai_error_persists_nothing(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    with factory.begin() as session:
+        session.add(_channel_policy_analysis(906))
+    _seed_thesis_candidate(factory, 906)
+    client = _FakeOpenAiClient(responses=[OpenAiClientError("transient failure")])
+
+    results = run_thesis_extraction(factory, client, model="gpt-4o-mini")
+
+    assert results[0].processed_count == 0
+    assert results[0].skipped_count == 1
+    with factory() as session:
+        assert session.scalar(select(func.count()).select_from(ThesisRow)) == 0
+
+
+def test_run_thesis_extraction_is_idempotent(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    with factory.begin() as session:
+        session.add(_channel_policy_analysis(907))
+    _seed_thesis_candidate(factory, 907)
+    client = _FakeOpenAiClient()
+
+    run_thesis_extraction(factory, client, model="gpt-4o-mini")
+    run_thesis_extraction(factory, client, model="gpt-4o-mini")
+
+    assert len(client.calls) == 1
+    with factory() as session:
+        assert session.scalar(select(func.count()).select_from(ThesisRow)) == 1
+
+
+def test_run_thesis_extraction_model_bump_appends_new_row(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    with factory.begin() as session:
+        session.add(_channel_policy_analysis(908))
+    _seed_thesis_candidate(factory, 908)
+    client = _FakeOpenAiClient()
+
+    run_thesis_extraction(factory, client, model="gpt-4o-mini")
+    run_thesis_extraction(factory, client, model="gpt-4o")
+
+    with factory() as session:
+        models = sorted(row.llm_model for row in session.scalars(select(ThesisRow)))
+        assert models == ["gpt-4o", "gpt-4o-mini"]
+
+
+def test_thesis_cannot_be_updated(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    with factory.begin() as session:
+        session.add(_channel_policy_analysis(909))
+    _seed_thesis_candidate(factory, 909)
+    run_thesis_extraction(factory, _FakeOpenAiClient(), model="gpt-4o-mini")
+
+    with engine.connect() as connection, pytest.raises(DBAPIError, match="append-only"):
+        connection.execute(text("UPDATE thesis SET status='INSUFFICIENT_DATA'"))
+
+
+def test_thesis_is_deleted_when_normalized_content_is_purged(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    now = datetime(2026, 9, 14, 0, 0, tzinfo=UTC)
+    with factory.begin() as session:
+        session.add(_channel_policy_analysis(910, raw_retention_days=1))
+    processor = TelegramMessageProcessor(
+        factory, MediaStore(Path("media")), frozenset({(910, None)})
+    )
+    processor.process(
+        _telegram_input(
+            channel_id=910,
+            message_id=1,
+            text=_THESIS_SOURCE_TEXT,
+            source_date=now - timedelta(days=5),
+            received_at=now - timedelta(days=5),
+        )
+    )
+    run_normalization(factory)
+    run_thesis_extraction(factory, _FakeOpenAiClient(), model="gpt-4o-mini")
+    with factory() as session:
+        assert session.scalar(select(func.count()).select_from(ThesisRow)) == 1
+
+    run_retention_cleanup(factory, MediaStore(Path("media")), now=lambda: now)
+
+    with factory() as session:
+        assert session.scalar(select(func.count()).select_from(ThesisRow)) == 0

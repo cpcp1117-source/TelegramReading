@@ -116,6 +116,30 @@ class Settings(BaseSettings):
             "BINANCE_SNAPSHOT_MAX_AGE_SECONDS", "APP_BINANCE_SNAPSHOT_MAX_AGE_SECONDS"
         ),
     )
+    openai_api_key: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("OPENAI_API_KEY", "APP_OPENAI_API_KEY"),
+    )
+    openai_api_base_url: str = Field(
+        default="https://api.openai.com",
+        validation_alias=AliasChoices("OPENAI_API_BASE_URL", "APP_OPENAI_API_BASE_URL"),
+    )
+    openai_request_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        validation_alias=AliasChoices(
+            "OPENAI_REQUEST_TIMEOUT_SECONDS", "APP_OPENAI_REQUEST_TIMEOUT_SECONDS"
+        ),
+    )
+    thesis_model: str = Field(
+        default="gpt-4o-mini",
+        validation_alias=AliasChoices("THESIS_MODEL", "APP_THESIS_MODEL"),
+    )
+    thesis_batch_size: int = Field(
+        default=25,
+        gt=0,
+        validation_alias=AliasChoices("THESIS_BATCH_SIZE", "APP_THESIS_BATCH_SIZE"),
+    )
 
     @field_validator("database_url")
     @classmethod
@@ -166,6 +190,20 @@ class Settings(BaseSettings):
     def validate_non_empty_control_bot_token(cls, value: SecretStr | None) -> SecretStr | None:
         if value is not None and not value.get_secret_value().strip():
             raise ValueError("Control Bot token cannot be blank")
+        return value
+
+    @field_validator("openai_api_key")
+    @classmethod
+    def validate_non_empty_openai_api_key(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None and not value.get_secret_value().strip():
+            raise ValueError("OpenAI API key cannot be blank")
+        return value
+
+    @field_validator("thesis_model")
+    @classmethod
+    def validate_non_empty_thesis_model(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("thesis model name cannot be blank")
         return value
 
     @field_validator("telegram_session_path", "control_bot_session_path")
