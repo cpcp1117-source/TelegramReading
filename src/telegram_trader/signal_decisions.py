@@ -36,14 +36,26 @@ def _event_id(request_id: str, callback_query_id: str) -> str:
     return hashlib.sha256(f"{request_id}:{callback_query_id}".encode()).hexdigest()
 
 
-def load_pending_signals(session: Session) -> list[NormalizedSignal]:
-    """Latest revision per `signal_id`, `status IN ('NEW','VALIDATED')`, not yet requested.
+def load_pending_signals(
+    session: Session, *, now: datetime | None = None
+) -> list[NormalizedSignal]:
+    """Latest revision per `signal_id`, `status IN ('NEW','VALIDATED')`, not yet
+    requested, and not yet past its own `expires_at`.
+
+    The `expires_at` check matters beyond live operation: a `parser_version`
+    bump re-parses the entire real backlog and appends fresh rows for every
+    message, including ones from weeks ago. Without this check, a signal
+    whose underlying message is long past its 24h `expires_at` window would
+    still look brand new here (never `signal_decision_requests`-requested
+    under its new `parser_version`) and flood a stale, already-irrelevant
+    notification the moment the version bump lands.
 
     No channel filter is needed: `normalized_signals` only ever contains
     rows for `EXECUTION_SIGNAL` channels by construction of Slice 2's own
     target loading -- an `ANALYSIS` channel like bonnie-blockchain never
     produces a row here at all.
     """
+    moment = now if now is not None else datetime.now(UTC)
     latest_revision = (
         select(
             NormalizedSignal.signal_id,
@@ -63,6 +75,7 @@ def load_pending_signals(session: Session) -> list[NormalizedSignal]:
         .where(
             NormalizedSignal.status.in_(("NEW", "VALIDATED")),
             NormalizedSignal.signal_row_id.not_in(already_requested),
+            NormalizedSignal.expires_at > moment,
         )
         .order_by(NormalizedSignal.created_at)
     )

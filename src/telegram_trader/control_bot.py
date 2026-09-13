@@ -241,11 +241,14 @@ class ControlBot:
 
         A signal is only ever notified once: `load_pending_signals` excludes
         anything with an existing `signal_decision_requests` row, and that
-        row is only created after the send below succeeds.
+        row is only created after the send below succeeds. It also excludes
+        anything already past its own `expires_at`, so a `parser_version`
+        bump re-parsing the entire real backlog does not flood a stale
+        notification for a trade idea from weeks ago.
         """
         count = 0
         with self._session_factory() as session:
-            pending = load_pending_signals(session)
+            pending = load_pending_signals(session, now=self._clock())
             for signal in pending:
                 nonce = generate_nonce()
                 message = await self._client.send_message(

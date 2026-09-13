@@ -1521,6 +1521,12 @@ def _channel_policy_execution_signal(channel_id: int, **overrides: object) -> Ch
     return _channel_policy(channel_id=channel_id, topic_id=0, **overrides)
 
 
+# One hour after `_telegram_input`'s default fixed `source_date` (2026-09-06
+# 08:00) -- safely inside the signal's 24h `expires_at` window regardless of
+# the real wall-clock date the test suite happens to run on.
+SIGNAL_FIXTURE_NOW = datetime(2026, 9, 6, 9, 0, tzinfo=UTC)
+
+
 def test_load_pending_signals_returns_latest_revision_without_existing_request(
     engine: Engine,
 ) -> None:
@@ -1531,9 +1537,30 @@ def test_load_pending_signals_returns_latest_revision_without_existing_request(
     run_signal_parsing(factory)
 
     with factory() as session:
-        pending = load_pending_signals(session)
+        pending = load_pending_signals(session, now=SIGNAL_FIXTURE_NOW)
 
     assert [row.channel_id for row in pending] == [800]
+
+
+def test_load_pending_signals_excludes_already_expired_signal(engine: Engine) -> None:
+    """A `parser_version` bump re-parsing weeks-old backlog must not surface
+
+    a signal whose 24h `expires_at` window (relative to its own message's
+    real `source_date`) has already passed -- otherwise every version bump
+    would flood a stale notification for old, no-longer-actionable trades.
+    """
+    factory = create_session_factory(engine)
+    with factory.begin() as session:
+        session.add(_channel_policy_execution_signal(802))
+    _run_pipeline(factory, 802, message_id=1, text="BTC 多 市價進場")
+    run_signal_parsing(factory)
+
+    with factory() as session:
+        still_pending = load_pending_signals(session, now=SIGNAL_FIXTURE_NOW)
+        assert [row.channel_id for row in still_pending] == [802]
+
+        after_expiry = load_pending_signals(session, now=SIGNAL_FIXTURE_NOW + timedelta(hours=24))
+        assert after_expiry == []
 
 
 def test_create_request_then_load_pending_excludes_it(engine: Engine) -> None:
@@ -1544,11 +1571,11 @@ def test_create_request_then_load_pending_excludes_it(engine: Engine) -> None:
     run_signal_parsing(factory)
 
     with factory.begin() as session:
-        (signal,) = load_pending_signals(session)
+        (signal,) = load_pending_signals(session, now=SIGNAL_FIXTURE_NOW)
         create_request(session, signal, nonce="nonce-1", telegram_message_id=42)
 
     with factory() as session:
-        assert load_pending_signals(session) == []
+        assert load_pending_signals(session, now=SIGNAL_FIXTURE_NOW) == []
         request = session.get(
             SignalDecisionRequest, request_id_for_signal_row(signal.signal_row_id)
         )
@@ -1557,19 +1584,13 @@ def test_create_request_then_load_pending_excludes_it(engine: Engine) -> None:
         assert request.expires_at == signal.expires_at
 
 
-# One hour after `_telegram_input`'s default fixed `source_date` (2026-09-06
-# 08:00) -- safely inside the signal's 24h `expires_at` window regardless of
-# the real wall-clock date the test suite happens to run on.
-SIGNAL_FIXTURE_NOW = datetime(2026, 9, 6, 9, 0, tzinfo=UTC)
-
-
 def _create_signal_and_request(factory, channel_id: int, text: str = "BTC 多 市價進場"):  # type: ignore[no-untyped-def]
     with factory.begin() as session:
         session.add(_channel_policy_execution_signal(channel_id))
     _run_pipeline(factory, channel_id, message_id=1, text=text)
     run_signal_parsing(factory)
     with factory.begin() as session:
-        (signal,) = load_pending_signals(session)
+        (signal,) = load_pending_signals(session, now=SIGNAL_FIXTURE_NOW)
         create_request(session, signal, nonce="nonce-1", telegram_message_id=42)
         request_id = request_id_for_signal_row(signal.signal_row_id)
     return request_id
@@ -1651,7 +1672,7 @@ def test_record_decision_stale_when_newer_revision_exists(engine: Engine) -> Non
     run_normalization(factory)
     run_signal_parsing(factory)
     with factory.begin() as session:
-        (signal,) = load_pending_signals(session)
+        (signal,) = load_pending_signals(session, now=now)
         create_request(session, signal, nonce="nonce-1", telegram_message_id=42)
         request_id = request_id_for_signal_row(signal.signal_row_id)
 
@@ -1909,7 +1930,9 @@ def test_signal_decision_edit_cascade_deletes_via_retention_cleanup(engine: Engi
     run_normalization(factory)
     run_signal_parsing(factory)
     with factory.begin() as session:
-        (signal,) = load_pending_signals(session)
+        # Requested right after the message's own source_date (well inside its
+        # 24h expires_at window), not the outer `now` used for retention below.
+        (signal,) = load_pending_signals(session, now=now - timedelta(days=5, hours=-1))
         create_request(session, signal, nonce="nonce-1", telegram_message_id=42)
         request_id = request_id_for_signal_row(signal.signal_row_id)
     with factory.begin() as session:
@@ -1950,7 +1973,7 @@ def test_signal_decision_rows_cascade_delete_via_retention_cleanup(engine: Engin
     run_normalization(factory)
     run_signal_parsing(factory)
     with factory.begin() as session:
-        (signal,) = load_pending_signals(session)
+        (signal,) = load_pending_signals(session, now=now - timedelta(days=5, hours=-1))
         create_request(session, signal, nonce="nonce-1", telegram_message_id=42)
         request_id = request_id_for_signal_row(signal.signal_row_id)
     with factory.begin() as session:
