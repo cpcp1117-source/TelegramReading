@@ -105,6 +105,17 @@ class Settings(BaseSettings):
             "CONTROL_BOT_POLL_INTERVAL_SECONDS", "APP_CONTROL_BOT_POLL_INTERVAL_SECONDS"
         ),
     )
+    binance_api_base_url: str = Field(
+        default="https://fapi.binance.com",
+        validation_alias=AliasChoices("BINANCE_API_BASE_URL", "APP_BINANCE_API_BASE_URL"),
+    )
+    binance_snapshot_max_age_seconds: float = Field(
+        default=21600.0,
+        gt=0,
+        validation_alias=AliasChoices(
+            "BINANCE_SNAPSHOT_MAX_AGE_SECONDS", "APP_BINANCE_SNAPSHOT_MAX_AGE_SECONDS"
+        ),
+    )
 
     @field_validator("database_url")
     @classmethod

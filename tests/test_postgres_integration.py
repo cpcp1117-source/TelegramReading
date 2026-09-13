@@ -16,6 +16,11 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session
 
 from telegram_trader import cli as cli_module
+from telegram_trader.binance_market_data import (
+    compute_snapshot_id,
+    load_latest_snapshot,
+    refresh_snapshot,
+)
 from telegram_trader.channel_policy import (
     ChannelPolicyError,
     evaluate_raw_collection,
@@ -31,6 +36,7 @@ from telegram_trader.mock_telegram import (
 )
 from telegram_trader.models import (
     AuditEvent,
+    BinanceSymbolSnapshot,
     ChannelPolicy,
     ConsumerCheckpoint,
     MockMessageReceipt,
@@ -74,7 +80,8 @@ def engine() -> Iterator[Engine]:
                 "TRUNCATE TABLE outbox_delivery_receipts, outbox_events, "
                 "signal_decision_events, signal_decision_requests, "
                 "normalized_signals, signal_parse_checkpoints, "
-                "normalized_content, telegram_message_versions, telegram_collector_checkpoints, "
+                "normalized_content, binance_symbol_snapshots, "
+                "telegram_message_versions, telegram_collector_checkpoints, "
                 "mock_message_receipts, consumer_checkpoints, audit_events, "
                 "channel_policies "
                 "RESTART IDENTITY CASCADE"
@@ -816,6 +823,156 @@ def test_run_normalization_marks_binance_dynamic_scope_pending(
         assert resolved == {"BTCUSDT": "PENDING_MARKET_DATA"}
 
 
+def test_run_normalization_resolves_binance_dynamic_scope_with_fresh_snapshot(
+    engine: Engine, tmp_path: Path
+) -> None:
+    factory = create_session_factory(engine)
+    processor = TelegramMessageProcessor(
+        factory, MediaStore(tmp_path / "media"), frozenset({(606, None)})
+    )
+    with factory.begin() as session:
+        session.add(
+            _channel_policy(
+                channel_id=606,
+                topic_id=0,
+                symbol_scope_mode="BINANCE_USDM_ACTIVE_PERPETUAL",
+                automation_authorization="GRANTED",
+                gate_decision="MONITOR_ONLY",
+            )
+        )
+        session.add(
+            BinanceSymbolSnapshot(
+                snapshot_id=compute_snapshot_id(
+                    datetime(2026, 9, 13, 0, 0, tzinfo=UTC), frozenset({"BTCUSDT"})
+                ),
+                fetched_at=datetime(2026, 9, 13, 0, 0, tzinfo=UTC),
+                active_symbols=["BTCUSDT"],
+                symbol_count=1,
+            )
+        )
+    processor.process(_telegram_input(channel_id=606, message_id=1, text="Long BTC now"))
+
+    run_normalization(
+        factory,
+        snapshot_max_age_seconds=999_999_999.0,
+    )
+
+    with factory() as session:
+        row = session.scalar(select(NormalizedContentRow))
+        assert row is not None
+        resolved = {item["symbol"]: item["status"] for item in row.resolved_symbols}
+        assert resolved == {"BTCUSDT": "VALID"}
+
+
+def test_run_normalization_stale_snapshot_still_pending_market_data(
+    engine: Engine, tmp_path: Path
+) -> None:
+    factory = create_session_factory(engine)
+    processor = TelegramMessageProcessor(
+        factory, MediaStore(tmp_path / "media"), frozenset({(607, None)})
+    )
+    stale_fetched_at = datetime.now(UTC) - timedelta(days=2)
+    with factory.begin() as session:
+        session.add(
+            _channel_policy(
+                channel_id=607,
+                topic_id=0,
+                symbol_scope_mode="BINANCE_USDM_ACTIVE_PERPETUAL",
+                automation_authorization="GRANTED",
+                gate_decision="MONITOR_ONLY",
+            )
+        )
+        session.add(
+            BinanceSymbolSnapshot(
+                snapshot_id=compute_snapshot_id(stale_fetched_at, frozenset({"BTCUSDT"})),
+                fetched_at=stale_fetched_at,
+                active_symbols=["BTCUSDT"],
+                symbol_count=1,
+            )
+        )
+    processor.process(_telegram_input(channel_id=607, message_id=1, text="Long BTC now"))
+
+    run_normalization(factory, snapshot_max_age_seconds=21600.0)
+
+    with factory() as session:
+        row = session.scalar(select(NormalizedContentRow))
+        assert row is not None
+        resolved = {item["symbol"]: item["status"] for item in row.resolved_symbols}
+        assert resolved == {"BTC": "PENDING_MARKET_DATA"}
+
+
+def test_binance_symbol_snapshots_cannot_be_updated(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    with factory.begin() as session:
+        session.add(
+            BinanceSymbolSnapshot(
+                snapshot_id=compute_snapshot_id(
+                    datetime(2026, 9, 13, 0, 0, tzinfo=UTC), frozenset({"BTCUSDT"})
+                ),
+                fetched_at=datetime(2026, 9, 13, 0, 0, tzinfo=UTC),
+                active_symbols=["BTCUSDT"],
+                symbol_count=1,
+            )
+        )
+
+    with engine.connect() as connection, pytest.raises(DBAPIError, match="append-only"):
+        connection.execute(text("UPDATE binance_symbol_snapshots SET symbol_count=2"))
+
+
+def test_refresh_snapshot_and_load_latest_snapshot_round_trip(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    fixed_now = datetime(2026, 9, 13, 12, 0, tzinfo=UTC)
+
+    class _FakeMarketDataClient:
+        def get_exchange_info(self) -> dict[str, object]:
+            return {
+                "symbols": [
+                    {"symbol": "BTCUSDT", "status": "TRADING", "contractType": "PERPETUAL"},
+                    {"symbol": "ETHUSDT", "status": "BREAK", "contractType": "PERPETUAL"},
+                ]
+            }
+
+    result = refresh_snapshot(_FakeMarketDataClient(), factory, clock=lambda: fixed_now)
+
+    assert result.symbol_count == 1
+    with factory() as session:
+        loaded = load_latest_snapshot(session, clock=lambda: fixed_now, max_age_seconds=60.0)
+        assert loaded is not None
+        assert loaded.active_symbols == frozenset({"BTCUSDT"})
+        assert loaded.fetched_at == fixed_now
+
+
+def test_load_latest_snapshot_returns_none_when_stale(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    stale_fetched_at = datetime(2026, 9, 13, 0, 0, tzinfo=UTC)
+    with factory.begin() as session:
+        session.add(
+            BinanceSymbolSnapshot(
+                snapshot_id=compute_snapshot_id(stale_fetched_at, frozenset({"BTCUSDT"})),
+                fetched_at=stale_fetched_at,
+                active_symbols=["BTCUSDT"],
+                symbol_count=1,
+            )
+        )
+
+    with factory() as session:
+        loaded = load_latest_snapshot(
+            session,
+            clock=lambda: stale_fetched_at + timedelta(hours=7),
+            max_age_seconds=21600.0,
+        )
+        assert loaded is None
+
+
+def test_load_latest_snapshot_returns_none_when_empty(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    with factory() as session:
+        loaded = load_latest_snapshot(
+            session, clock=lambda: datetime.now(UTC), max_age_seconds=21600.0
+        )
+        assert loaded is None
+
+
 def test_run_normalization_is_idempotent(engine: Engine, tmp_path: Path) -> None:
     factory = create_session_factory(engine)
     processor = TelegramMessageProcessor(
@@ -1512,6 +1669,7 @@ def test_record_decision_stale_when_newer_revision_exists(engine: Engine) -> Non
             actor_user_id=555,
             callback_query_id="cbq-1",
             action="APPROVE",
+            now=now + timedelta(minutes=2),
         )
 
     assert outcome == "REJECTED_STALE"

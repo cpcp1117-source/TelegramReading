@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 from telegram_trader.normalization import (
     ChannelSymbolPolicy,
+    ExchangeSnapshot,
     RawContent,
     classify_media,
     extract_symbol_candidates,
@@ -120,10 +123,11 @@ def test_resolve_symbol_prohibited_blocks_bare_asset_alias_too() -> None:
     assert decision.status == "INVALID"
 
 
-def test_resolve_symbol_binance_dynamic_scope_is_always_pending() -> None:
+def test_resolve_symbol_binance_dynamic_scope_pending_without_snapshot() -> None:
+    """No usable data yet (none fetched, or the caller decided it's stale) -> fail closed."""
     policy = _policy(symbol_scope_mode="BINANCE_USDM_ACTIVE_PERPETUAL", allowed_symbols=frozenset())
 
-    decision = resolve_symbol("BTCUSDT", policy)
+    decision = resolve_symbol("BTCUSDT", policy, snapshot=None)
 
     assert decision.status == "PENDING_MARKET_DATA"
 
@@ -136,6 +140,61 @@ def test_resolve_symbol_binance_dynamic_scope_still_respects_prohibited() -> Non
     )
 
     decision = resolve_symbol("LUNAUSDT", policy)
+
+    assert decision.status == "INVALID"
+
+
+def _snapshot(active_symbols: frozenset[str]) -> ExchangeSnapshot:
+    return ExchangeSnapshot(
+        fetched_at=datetime(2026, 9, 13, tzinfo=UTC), active_symbols=active_symbols
+    )
+
+
+def test_resolve_symbol_binance_dynamic_scope_valid_with_matching_snapshot() -> None:
+    policy = _policy(symbol_scope_mode="BINANCE_USDM_ACTIVE_PERPETUAL", allowed_symbols=frozenset())
+
+    decision = resolve_symbol(
+        "BTCUSDT", policy, snapshot=_snapshot(frozenset({"BTCUSDT", "ETHUSDT"}))
+    )
+
+    assert decision.symbol == "BTCUSDT"
+    assert decision.status == "VALID"
+
+
+def test_resolve_symbol_binance_dynamic_scope_resolves_bare_asset_via_alias() -> None:
+    policy = _policy(symbol_scope_mode="BINANCE_USDM_ACTIVE_PERPETUAL", allowed_symbols=frozenset())
+
+    decision = resolve_symbol("BTC", policy, snapshot=_snapshot(frozenset({"BTCUSDT"})))
+
+    assert decision.symbol == "BTCUSDT"
+    assert decision.status == "VALID"
+
+
+def test_resolve_symbol_binance_dynamic_scope_invalid_when_snapshot_has_no_match() -> None:
+    policy = _policy(symbol_scope_mode="BINANCE_USDM_ACTIVE_PERPETUAL", allowed_symbols=frozenset())
+
+    decision = resolve_symbol("DOGE", policy, snapshot=_snapshot(frozenset({"BTCUSDT"})))
+
+    assert decision.status == "INVALID"
+
+
+def test_resolve_symbol_binance_dynamic_scope_invalid_when_ambiguous() -> None:
+    """A candidate matching both a USDT and a USDC perpetual isn't uniquely mapped (FR-002)."""
+    policy = _policy(symbol_scope_mode="BINANCE_USDM_ACTIVE_PERPETUAL", allowed_symbols=frozenset())
+
+    decision = resolve_symbol("BTC", policy, snapshot=_snapshot(frozenset({"BTCUSDT", "BTCUSDC"})))
+
+    assert decision.status == "INVALID"
+
+
+def test_resolve_symbol_binance_dynamic_scope_prohibited_overrides_snapshot_match() -> None:
+    policy = _policy(
+        symbol_scope_mode="BINANCE_USDM_ACTIVE_PERPETUAL",
+        allowed_symbols=frozenset(),
+        prohibited_symbols=frozenset({"BTCUSDT"}),
+    )
+
+    decision = resolve_symbol("BTCUSDT", policy, snapshot=_snapshot(frozenset({"BTCUSDT"})))
 
     assert decision.status == "INVALID"
 
@@ -200,3 +259,14 @@ def test_normalize_message_resolves_symbols_against_policy() -> None:
 
     resolved = {r.symbol: r.status for r in result.resolved_symbols}
     assert resolved == {"BTCUSDT": "VALID", "DOGEUSDT": "INVALID"}
+
+
+def test_normalize_message_threads_snapshot_into_dynamic_scope_resolution() -> None:
+    result = normalize_message(
+        _raw(text="Long BTC now"),
+        _policy(symbol_scope_mode="BINANCE_USDM_ACTIVE_PERPETUAL", allowed_symbols=frozenset()),
+        snapshot=_snapshot(frozenset({"BTCUSDT"})),
+    )
+
+    resolved = {r.symbol: r.status for r in result.resolved_symbols}
+    assert resolved == {"BTCUSDT": "VALID"}

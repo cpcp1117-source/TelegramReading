@@ -19,7 +19,11 @@ def main() -> int:
     configure_logging(settings.log_level)
     engine = create_db_engine(settings)
     try:
-        results = run_normalization(create_session_factory(engine), batch_size=args.batch_size)
+        results = run_normalization(
+            create_session_factory(engine),
+            batch_size=args.batch_size,
+            snapshot_max_age_seconds=settings.binance_snapshot_max_age_seconds,
+        )
         for result in results:
             print(
                 f"channel_id={result.channel_id} topic_id={result.topic_id} "

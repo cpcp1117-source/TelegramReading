@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from sqlalchemy import ColumnElement, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session, sessionmaker
 
+from telegram_trader.binance_market_data import load_latest_snapshot
 from telegram_trader.channel_policy import ChannelPolicySnapshot, evaluate_raw_collection
 from telegram_trader.models import ChannelPolicy, TelegramMessageVersion
 from telegram_trader.models import NormalizedContent as NormalizedContentRow
@@ -93,6 +95,7 @@ def run_normalization(
     *,
     batch_size: int = 500,
     version: str = CURRENT_NORMALIZER_VERSION,
+    snapshot_max_age_seconds: float = 21600.0,
 ) -> list[NormalizationResult]:
     """Normalize committed `telegram_message_versions` rows into `normalized_content`.
 
@@ -100,9 +103,26 @@ def run_normalization(
     insertion uses `ON CONFLICT DO NOTHING`, so re-running this job is always
     safe. A `NOT IN` subquery over already-normalized `raw_message_id`s for
     the current version means already-normalized history is never re-read.
+
+    The latest Binance exchange snapshot (if fresh) is loaded once per
+    invocation and applied to every dynamic-scope candidate in this run --
+    see `binance_market_data.load_latest_snapshot`. A missing/stale
+    snapshot is logged once here (not per message) so a broken refresh
+    cron is visible without querying the database.
     """
     with session_factory() as session:
         targets = load_normalization_targets(session)
+        snapshot = load_latest_snapshot(
+            session,
+            clock=lambda: datetime.now(UTC),
+            max_age_seconds=snapshot_max_age_seconds,
+        )
+    if snapshot is None:
+        LOGGER.warning(
+            "no fresh binance exchange snapshot available; dynamic-scope symbols "
+            "will resolve PENDING_MARKET_DATA this run",
+            extra={"context": {"max_age_seconds": snapshot_max_age_seconds}},
+        )
 
     results: list[NormalizationResult] = []
     for target in targets:
@@ -138,6 +158,7 @@ def run_normalization(
                         ),
                         target.symbol_policy,
                         version=version,
+                        snapshot=snapshot,
                     )
                     session.execute(
                         pg_insert(NormalizedContentRow)

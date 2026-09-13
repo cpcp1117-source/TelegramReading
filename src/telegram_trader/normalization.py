@@ -5,9 +5,10 @@ import json
 import re
 import unicodedata
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Literal
 
-CURRENT_NORMALIZER_VERSION = "v2"
+CURRENT_NORMALIZER_VERSION = "v3"
 
 SymbolStatus = Literal["VALID", "INVALID", "PENDING_MARKET_DATA"]
 MediaReviewStatus = Literal["NOT_APPLICABLE", "PENDING_MANUAL_REVIEW"]
@@ -44,6 +45,21 @@ class ChannelSymbolPolicy:
     symbol_scope_mode: str
     allowed_symbols: frozenset[str]
     prohibited_symbols: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
+class ExchangeSnapshot:
+    """A pure, already-staleness-decided view of the latest `binance_symbol_snapshots` row.
+
+    `binance_market_data.load_latest_snapshot` is the only place that reads
+    a clock or a staleness threshold; by the time a snapshot reaches
+    `resolve_symbol`, it is either `None` ("no usable data right now, for
+    any reason") or fresh. This keeps normalization free of any wall-clock
+    dependency, preserving the NFR-010 determinism contract.
+    """
+
+    fetched_at: datetime
+    active_symbols: frozenset[str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,33 +123,57 @@ def extract_symbol_candidates(normalized_text: str) -> list[str]:
 
 _QUOTE_CURRENCY_SUFFIXES = ("USDT", "USD", "BUSD")
 
+# Distinct from _QUOTE_CURRENCY_SUFFIXES: that tuple was built for
+# STATIC_ALLOWLIST's curated fixtures and is left untouched (already
+# live-verified). Real Binance USDⓈ-M exchangeInfo data no longer has BUSD-
+# margined perpetuals (delisted Dec 2023) but does have live USDC-margined
+# perpetuals alongside USDT ones (e.g. BTCUSDT and BTCUSDC can both be
+# active) -- the one realistic case where a candidate maps to more than one
+# active perpetual.
+_DYNAMIC_SCOPE_QUOTE_SUFFIXES = ("USDT", "USDC")
 
-def _candidate_aliases(candidate: str) -> tuple[str, ...]:
-    """A bare base-asset shorthand (e.g. "BTC") plus its common USD-quoted pair spellings.
+
+def _candidate_aliases(
+    candidate: str, *, suffixes: tuple[str, ...] = _QUOTE_CURRENCY_SUFFIXES
+) -> tuple[str, ...]:
+    """A bare base-asset shorthand (e.g. "BTC") plus its common quoted-pair spellings.
 
     Real channel data shows authors routinely write the bare asset name
     ("BTC", "ETH") even when the channel's allowlist is expressed as a
-    quoted pair ("BTCUSDT"). This only widens what counts as a *match* for
-    `STATIC_ALLOWLIST`; it never invents a pair that isn't already on the
-    channel's declared allowlist.
+    quoted pair ("BTCUSDT"). This only widens what counts as a *match*; it
+    never invents a pair that isn't already present in whatever the caller
+    is matching against (an allowlist, or a live exchange snapshot).
     """
-    return (candidate, *(candidate + suffix for suffix in _QUOTE_CURRENCY_SUFFIXES))
+    return (candidate, *(candidate + suffix for suffix in suffixes))
 
 
-def resolve_symbol(candidate: str, policy: ChannelSymbolPolicy) -> ResolvedSymbol:
+def resolve_symbol(
+    candidate: str,
+    policy: ChannelSymbolPolicy,
+    *,
+    snapshot: ExchangeSnapshot | None = None,
+) -> ResolvedSymbol:
     """Resolve one candidate against its channel's declared symbol scope.
 
-    `BINANCE_USDM_ACTIVE_PERPETUAL` always resolves to `PENDING_MARKET_DATA`
-    in Phase 4: this phase must not call any Binance endpoint (not even
-    public market data -- that starts Phase 5), so a dynamic-scope symbol
-    cannot be confirmed as an active perpetual yet, regardless of whether it
-    is spelled as a bare asset or a full pair. Marking it explicitly
-    unresolved (rather than guessing VALID) keeps the system fail-closed.
+    `BINANCE_USDM_ACTIVE_PERPETUAL` resolves against `snapshot` when one is
+    available: `snapshot=None` means "no usable exchange data right now",
+    for any reason (none fetched yet, or the caller's own staleness check
+    rejected it -- see `ExchangeSnapshot`), and keeps the prior Phase 4
+    fail-closed behavior of `PENDING_MARKET_DATA` rather than guessing
+    VALID. When a snapshot is available, a candidate matching exactly one
+    active perpetual (bare or aliased) resolves VALID; zero or more than
+    one match (not uniquely mapped, per FR-002) resolves INVALID.
     """
     if policy.symbol_scope_mode == "BINANCE_USDM_ACTIVE_PERPETUAL":
         if candidate in policy.prohibited_symbols:
             return ResolvedSymbol(candidate, "INVALID")
-        return ResolvedSymbol(candidate, "PENDING_MARKET_DATA")
+        if snapshot is None:
+            return ResolvedSymbol(candidate, "PENDING_MARKET_DATA")
+        aliases = _candidate_aliases(candidate, suffixes=_DYNAMIC_SCOPE_QUOTE_SUFFIXES)
+        matches = [alias for alias in aliases if alias in snapshot.active_symbols]
+        if len(matches) == 1:
+            return ResolvedSymbol(matches[0], "VALID")
+        return ResolvedSymbol(candidate, "INVALID")
     if policy.symbol_scope_mode == "STATIC_ALLOWLIST":
         aliases = _candidate_aliases(candidate)
         if any(alias in policy.prohibited_symbols for alias in aliases):
@@ -162,15 +202,17 @@ def normalize_message(
     policy: ChannelSymbolPolicy,
     *,
     version: str = CURRENT_NORMALIZER_VERSION,
+    snapshot: ExchangeSnapshot | None = None,
 ) -> NormalizedContentResult:
-    """Deterministic composition: same `raw` + `policy` + `version` always
+    """Deterministic composition: same `raw` + `policy` + `version` + `snapshot` always
 
     produces byte-identical output (NFR-010), since every step above is a
-    pure function over its inputs.
+    pure function over its inputs -- `snapshot` is an explicit, versioned
+    input the same way `policy` already is, not a live lookup.
     """
     normalized_text = normalize_text(raw.text, raw.content_type)
     candidates = extract_symbol_candidates(normalized_text)
-    resolved = [resolve_symbol(candidate, policy) for candidate in candidates]
+    resolved = [resolve_symbol(candidate, policy, snapshot=snapshot) for candidate in candidates]
     media_review_status = classify_media(raw.media_sha256)
 
     canonical = {

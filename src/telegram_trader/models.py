@@ -523,3 +523,28 @@ class SignalDecisionEvent(Base):
     decided_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class BinanceSymbolSnapshot(Base):
+    """A versioned, append-only fetch of Binance USD(S)-M futures `exchangeInfo` (FR-002).
+
+    Distinct from the spec's `market_snapshot` entity (per-symbol,
+    time-bound price/mark evidence -- almost certainly a Phase 6 concern for
+    BR-006 order-time freshness checks); this table records *which symbols
+    exist and are active*, consumed by `normalization.resolve_symbol` for
+    dynamic-scope (`BINANCE_USDM_ACTIVE_PERPETUAL`) resolution. `snapshot_id`
+    bakes in `fetched_at`, so this is an append-only audit trail, not a
+    dedup mechanism -- `load_latest_snapshot` always reads the newest row by
+    `fetched_at`.
+    """
+
+    __tablename__ = "binance_symbol_snapshots"
+    __table_args__ = (Index("ix_binance_symbol_snapshots_fetched_at", "fetched_at"),)
+
+    snapshot_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    active_symbols: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    symbol_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )

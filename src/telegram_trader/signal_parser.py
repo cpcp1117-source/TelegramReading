@@ -5,7 +5,13 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Literal
 
-CURRENT_PARSER_VERSION = "v1"
+# Bumped v1 -> v2 with NO parser-logic change: normalization.CURRENT_NORMALIZER_VERSION
+# was bumped v2 -> v3 (Phase 5 Slice 1, dynamic symbol resolution against a real
+# Binance exchange snapshot), and normalized_signals' uniqueness constraint plus
+# SignalParseCheckpoint's cursor are both scoped per parser_version -- this bump
+# exists solely to force parse_signals.py to reprocess the backlog against the
+# new v3 normalized_content rows, not to change any parsing behavior.
+CURRENT_PARSER_VERSION = "v2"
 
 Side = Literal["LONG", "SHORT"]
 EntryType = Literal["MARKET", "LIMIT", "RANGE"]
