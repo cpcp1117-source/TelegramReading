@@ -26,3 +26,17 @@ Phase 4 scope.
 ## Inherited From Phase 4 (still open)
 
 Per [../phase-4/known-issues.md](../phase-4/known-issues.md): P4-MAJOR-001 (edited-message/supersede linking), and Phase 2's five risk-accepted NOTVERIFIED items, both carried forward unchanged.
+
+## Phase 2 NOTVERIFIED Follow-up (in progress)
+
+Per [../phase-2/known-issues.md](../phase-2/known-issues.md) (record preserved there
+as-is, user-accepted 2026-09-06; progress tracked here instead since Phase 5's
+`unless-stopped` change is what finally made continuous real operation possible):
+
+| Phase 2 ID | Status | Detail |
+|---|---|---|
+| NOTVERIFIED-005 (coverage ≥ 85%) | **Closed 2026-09-13** | Full combined unit+integration suite against a disposable Postgres: 303 passed, 88.05% coverage (threshold 85%) -- see P5-MAJOR-002's verification run above. Supersedes the original 73.91%/non-integration-only figure. |
+| NOTVERIFIED-002 (controlled restart, no message loss) | **Still inconclusive, but with a stronger case than 2026-09-06** | 2026-09-14: `collector` stopped ~5 minutes, then restarted. Checkpoints and row counts for both channels were bit-for-bit identical before/after (`@followgerry` `last_message_id=6691`/538 rows; bonnie-blockchain `last_message_id=99513`/514 rows) -- the channels were simply quiet during the window, same "no message to test loss against" gap as the original finding. Not proven empirically yet, but the structural guarantee is now written down explicitly: `backfill()` in `telegram_collector.py` always re-fetches from `checkpoint - backfill_overlap` (100-message overlap, not just the bare checkpoint) on every startup, and `telegram_message_versions`' `uq_telegram_message_version` unique constraint on `(channel_id, message_id, edit_version)` makes re-ingesting that overlap window a no-op rather than a duplicate. Together these mean no-loss does not actually depend on restart timing luck -- but an empirical catch of a real message arriving mid-restart is still the strongest possible evidence and remains open. |
+| NOTVERIFIED-001 (24h continuous run) | **In progress** | `collector`/`control-bot` are now `restart: unless-stopped` and have been running continuously since 2026-09-14 13:35 UTC with `RestartCount=0`. Passive -- just needs wall-clock time to pass without a crash. |
+| NOTVERIFIED-003 (live edit retention) | Still open | Needs a real edited message from either channel owner; cannot be forced. |
+| NOTVERIFIED-004 (500-row reconciliation) | Still open | Only 20/500 rows spot-checked as of the original 2026-09-06 finding; not yet attempted this round. |
