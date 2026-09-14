@@ -109,7 +109,7 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-    restart: "no"
+    restart: unless-stopped
 
   control-bot:
     profiles: ["control-bot"]
@@ -147,7 +147,7 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-    restart: "no"
+    restart: unless-stopped
 
 volumes:
   postgres_data:
