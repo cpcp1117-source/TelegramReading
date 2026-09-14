@@ -5,8 +5,9 @@
 - **Date:** 2026-09-14
 - **Implementation Fixed Point:** `fcb6fd7`
 - **Branch:** `phase/2-telegram-readonly-collector` (unchanged since Phase 2)
-- **Gate Verdict:** see [gate-5-checklist.md](gate-5-checklist.md)
-- **User Acceptance:** see [gate-5-checklist.md](gate-5-checklist.md)
+- **Gate Verdict:** `READY` (risk-accepted; see [gate-5-checklist.md](gate-5-checklist.md))
+- **User Acceptance:** `ACCEPTED` (2026-09-14)
+- **Next Phase Permission:** `GRANTED`
 
 ## 1. Outcome
 

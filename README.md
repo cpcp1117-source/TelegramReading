@@ -4,15 +4,17 @@
 
 ## Current Status
 
-- Completed phases: `Phase 0 — Requirements and Architecture`; `Phase 1 — Offline Foundation`
-- Active phase: `Phase 2 — Telegram Read-only Collector` (IN PROGRESS)
-- Gate status: `Phase 0 READY + USER_ACCEPTED`; `Phase 1 READY + USER_ACCEPTED`; `Gate 2 NOT EVALUATED`
-- Runtime code: Phase 1 offline-only skeleton exists
-- External credentials: Phase 2 僅允許透過本機 terminal 引入 Telegram credentials；不得加入工作區、Git、log 或報告
-- Git branch: `phase/2-telegram-readonly-collector`
+- Completed phases: `Phase 0 — Requirements and Architecture`; `Phase 1 — Offline Foundation`; `Phase 2 — Telegram Read-only Collector`; `Phase 3 — Channel Policy Enforcement`; `Phase 4 — Signal Lifecycle / Control Bot`; `Phase 5 — AI Analysis / Public Market Data` (risk-accepted; AI/ANALYSIS path paused, see [gate-5-checklist.md](docs/phase-5/gate-5-checklist.md))
+- Active phase: `Phase 6` (KICKOFF — not yet started)
+- Gate status: Phases 0–5 all `READY + USER_ACCEPTED`; `Gate 6 NOT EVALUATED`
+- Runtime code: Telegram read-only collector, Channel Policy enforcement, normalization/signal-parsing pipeline, Control Bot (approve/reject/edit SL-TP), Binance public market-data resolution, Thesis extraction (code-complete, not yet run against real data — AI path paused)
+- `collector`/`control-bot` run continuously (`restart: unless-stopped`) against the real `@followgerry` and bonnie-blockchain channels
+- External credentials: Telegram (collector + Control Bot), PostgreSQL, and OpenAI credentials are only ever entered via local terminal / local `.env`; never added to the workspace, Git, logs, or reports
+- Git branch: `phase/2-telegram-readonly-collector` (unchanged since Phase 2; no phase has needed a new branch)
 - Git remote: `https://github.com/cpcp1117-source/TelegramReading.git`
-- Initial channel scope: only `@followgerry`; future channels require separate onboarding after the current system is stable
-- Next permitted action: implement and verify only the Phase 2 read-only Telegram collector scope
+- Onboarded channels: `@followgerry` (`EXECUTION_SIGNAL`, dynamic Binance-resolved scope); bonnie-blockchain (`ANALYSIS`, authorized but AI path paused)
+- Known open items: `P4-MAJOR-001` (edited-message/supersede linking, mandatory before Production Gate 8); FR-013/FR-014 (Strategy Contract/Market Confirmation/Candidate Trade, paused, no forced deadline) — see [docs/phase-5/known-issues.md](docs/phase-5/known-issues.md)
+- Next permitted action: Phase 6 planning/kickoff
 
 ## Phase 0 Deliverables
 
@@ -34,7 +36,7 @@
 
 ## Gate Rule
 
-Gate 0 re-review 為 `READY`，使用者已於 2026-09-03 明確批准 Specification v0.2。Phase 1 已於 2026-09-06 取得使用者驗收、合併至 `main`，並建立 `phase-1-accepted` tag。Phase 2 僅可開發 Telegram read-only collector；Binance、OpenAI、訊號解析與真實交易能力仍禁止。
+Gate 0 re-review 為 `READY`，使用者已於 2026-09-03 明確批准 Specification v0.2。Phase 1 已於 2026-09-06 取得使用者驗收、合併至 `main`，並建立 `phase-1-accepted` tag。Phase 2–5 均已依序取得 `READY + USER_ACCEPTED`（詳見各 `docs/phase-N/gate-N-checklist.md`）。Phase 5 為風險接受：AI/ANALYSIS 路線（Strategy Contract、Market Confirmation、Candidate Trade）暫停，尚未實作，見 [gate-5-checklist.md](docs/phase-5/gate-5-checklist.md)。目前仍禁止任何真實下單/執行能力，待未來 Phase 開放。
 
 ## Phase 1 — Offline Foundation
 

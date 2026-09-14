@@ -2,9 +2,9 @@
 
 - **Phase:** Phase 5 — AI Analysis / Public Market Data
 - **Fixed Point:** `fcb6fd7`
-- **Proposed Gate Verdict:** `READY` (risk-accepted) — pending user review below
-- **User Acceptance:** *pending*
-- **Phase 6 Authorization:** *pending*
+- **Gate Verdict:** `READY` (risk-accepted) — AI/ANALYSIS path (FR-013/FR-014) paused, not resolved
+- **User Acceptance:** `ACCEPTED` (2026-09-14)
+- **Phase 6 Authorization:** `GRANTED`
 
 | Gate Condition | Result | Evidence |
 |---|---|---|
@@ -41,10 +41,8 @@ Three options, same framing this project has used for every prior phase's open i
 
 ## User Acceptance Record
 
-*Awaiting the user's review of this checklist. Fill in below once decided:*
-
-- **Date:**
-- **Decision:** (which option above, or another)
-- **User's own words:**
-- **Binding consequence:**
-- **Phase 6 Authorization:**
+- **Date:** 2026-09-14
+- **Decision:** Option 2 — mark Gate 5 `READY`, risk-accept the AI/ANALYSIS-path pause (FR-013/FR-014 not implemented, Thesis extraction never run against real data) rather than block on it, and proceed to Phase 6 planning.
+- **User's own words:** "風險接受暫停AI路線，先繼續規劃Phase 6" (risk-accept pausing the AI path, proceed to planning Phase 6).
+- **Binding consequence:** FR-013/FR-014 (Strategy Contract, Market Confirmation, Candidate Trade) and `TBD-004` (Strategy Contract rules per channel) remain open, carried forward with no forced deadline -- to be resumed whenever the user chooses to revisit the AI/ANALYSIS path, not tied to any Production Gate the way P4-MAJOR-001 is. Thesis extraction's code/tests remain valid and unmodified; nothing needs to be redone when this path is picked back up, only actually run and then built upon.
+- **Phase 6 Authorization:** `GRANTED` as of this record, per [ADR-0001](../adr/0001-sequential-stage-gates.md). Phase 4's P4-MAJOR-001 and Phase 2's five inherited items (now all closed, see [known-issues.md](known-issues.md)) remain tracked as before -- this acceptance does not reopen or resolve anything beyond Phase 5's own scope.
