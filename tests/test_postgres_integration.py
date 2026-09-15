@@ -42,6 +42,7 @@ from telegram_trader.models import (
     MockMessageReceipt,
     OutboxDeliveryReceipt,
     OutboxEvent,
+    RiskConfigSnapshot,
     SignalDecisionEdit,
     SignalDecisionEvent,
     SignalDecisionRequest,
@@ -50,7 +51,9 @@ from telegram_trader.models import (
 )
 from telegram_trader.models import NormalizedContent as NormalizedContentRow
 from telegram_trader.models import NormalizedSignal as NormalizedSignalRow
+from telegram_trader.models import RiskDecision as RiskDecisionRow
 from telegram_trader.models import Thesis as ThesisRow
+from telegram_trader.models import TradeIntent as TradeIntentRow
 from telegram_trader.normalize_content import NormalizationResult, run_normalization
 from telegram_trader.openai_client import OpenAiClientError
 from telegram_trader.outbox import OutboxConsumer
@@ -71,6 +74,7 @@ from telegram_trader.telegram_storage import (
     TelegramMessageProcessor,
 )
 from telegram_trader.thesis_extraction import ThesisExtractionResult, run_thesis_extraction
+from telegram_trader.trade_intent_pipeline import run_risk_evaluation
 
 pytestmark = pytest.mark.integration
 
@@ -2275,3 +2279,212 @@ def test_thesis_is_deleted_when_normalized_content_is_purged(engine: Engine) -> 
 
     with factory() as session:
         assert session.scalar(select(func.count()).select_from(ThesisRow)) == 0
+
+
+# --- Phase 6 Slice 1: Risk Engine (trade_intent / risk_decision) ---
+
+# 30s after `_telegram_input`'s default fixed `source_date` (2026-09-06
+# 08:00) -- inside both the signal's 24h expires_at window AND BR-006's much
+# tighter 60s source-age / 10s receive-lag freshness window (unlike
+# SIGNAL_FIXTURE_NOW, which is 1 hour later -- fine for expires_at, much too
+# late for BR-006).
+RISK_NOW = datetime(2026, 9, 6, 8, 0, 30, tzinfo=UTC)
+
+
+class _FakeRiskMarketDataClient:
+    def __init__(self, price: Decimal | None = Decimal("100")) -> None:
+        self._price = price
+
+    def get_mark_price(self, symbol: str) -> dict[str, str]:
+        if self._price is None:
+            return {}  # no markPrice key -- fetch_mark_price raises, pipeline fails closed
+        return {"markPrice": str(self._price)}
+
+
+def _risk_settings(equity: Decimal = Decimal("10000")) -> Settings:
+    return Settings(risk_equity_baseline_usdt=equity)
+
+
+def _approve_signal(  # type: ignore[no-untyped-def]
+    factory, channel_id: int, text: str = "BTC 多 市價進場", *, nonce: str = "nonce-risk"
+) -> None:
+    """EXECUTION_SIGNAL channel, STATIC_ALLOWLIST BTCUSDT -- reaches VALIDATED,
+
+    then approved via the Control Bot's own `record_decision`, exactly the
+    real trigger `run_risk_evaluation` consumes.
+    """
+    with factory.begin() as session:
+        session.add(_channel_policy_execution_signal(channel_id))
+    _run_pipeline(factory, channel_id, message_id=1, text=text)
+    run_signal_parsing(factory)
+    with factory.begin() as session:
+        (signal,) = load_pending_signals(session, now=RISK_NOW)
+        create_request(session, signal, nonce=nonce, telegram_message_id=42)
+        request_id = request_id_for_signal_row(signal.signal_row_id)
+    with factory.begin() as session:
+        outcome = record_decision(
+            session,
+            request_id=request_id,
+            actor_user_id=555,
+            callback_query_id=f"cbq-{nonce}",
+            action="APPROVE",
+            now=RISK_NOW,
+        )
+    assert outcome == "APPROVED"
+
+
+def test_run_risk_evaluation_approves_clean_signal(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    _approve_signal(factory, 820)
+
+    results = run_risk_evaluation(
+        factory,
+        settings=_risk_settings(),
+        market_data_client=_FakeRiskMarketDataClient(Decimal("100")),
+        clock=lambda: RISK_NOW,
+    )
+
+    assert len(results) == 1
+    assert results[0].verdict == "APPROVED"
+    assert results[0].symbol == "BTCUSDT"
+    with factory() as session:
+        intent = session.scalar(select(TradeIntentRow).where(TradeIntentRow.channel_id == 820))
+        assert intent is not None
+        assert intent.status == "RISK_APPROVED"
+        assert intent.symbol == "BTCUSDT"
+        assert intent.side == "LONG"
+        assert intent.stop_value is None  # never authored, DEFAULT_ROE_30
+
+        decision = session.scalar(
+            select(RiskDecisionRow).where(RiskDecisionRow.intent_id == intent.intent_id)
+        )
+        assert decision is not None
+        assert decision.verdict == "APPROVED"
+        assert decision.reason_codes == []
+        assert decision.computed_stop_price == Decimal("94")  # ROE-30% baseline @ entry=100
+        assert decision.quantity is not None and decision.quantity > 0
+        assert decision.entry_price_used == Decimal("100")
+
+        config_row = session.scalar(select(RiskConfigSnapshot))
+        assert config_row is not None
+        assert config_row.leverage == 5
+
+
+def test_run_risk_evaluation_is_idempotent(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    _approve_signal(factory, 821)
+
+    first = run_risk_evaluation(
+        factory,
+        settings=_risk_settings(),
+        market_data_client=_FakeRiskMarketDataClient(Decimal("100")),
+        clock=lambda: RISK_NOW,
+    )
+    second = run_risk_evaluation(
+        factory,
+        settings=_risk_settings(),
+        market_data_client=_FakeRiskMarketDataClient(Decimal("100")),
+        clock=lambda: RISK_NOW,
+    )
+
+    assert len(first) == 1
+    assert len(second) == 0
+    with factory() as session:
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(TradeIntentRow)
+                .where(TradeIntentRow.channel_id == 821)
+            )
+            == 1
+        )
+
+
+def test_run_risk_evaluation_rejects_when_mark_price_unavailable(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    _approve_signal(factory, 822)
+
+    results = run_risk_evaluation(
+        factory,
+        settings=_risk_settings(),
+        market_data_client=_FakeRiskMarketDataClient(None),
+        clock=lambda: RISK_NOW,
+    )
+
+    assert len(results) == 1
+    assert results[0].verdict == "REJECTED"
+    assert results[0].reason_codes == ["STALE_MARKET_DATA"]
+    with factory() as session:
+        intent = session.scalar(select(TradeIntentRow).where(TradeIntentRow.channel_id == 822))
+        assert intent is not None
+        assert intent.status == "RISK_REJECTED"
+        decision = session.scalar(
+            select(RiskDecisionRow).where(RiskDecisionRow.intent_id == intent.intent_id)
+        )
+        assert decision is not None
+        assert decision.quantity is None
+        assert decision.computed_stop_price is None
+
+
+def test_run_risk_evaluation_requires_configured_equity_baseline(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    _approve_signal(factory, 823)
+
+    with pytest.raises(ValueError, match="RISK_EQUITY_BASELINE_USDT"):
+        run_risk_evaluation(
+            factory,
+            settings=Settings(),  # risk_equity_baseline_usdt left unset
+            market_data_client=_FakeRiskMarketDataClient(Decimal("100")),
+            clock=lambda: RISK_NOW,
+        )
+
+
+def test_trade_intent_and_risk_decision_are_append_only(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    _approve_signal(factory, 824)
+    run_risk_evaluation(
+        factory,
+        settings=_risk_settings(),
+        market_data_client=_FakeRiskMarketDataClient(Decimal("100")),
+        clock=lambda: RISK_NOW,
+    )
+
+    with engine.connect() as connection, pytest.raises(DBAPIError, match="append-only"):
+        connection.execute(text("UPDATE trade_intent SET status='CANCELLED'"))
+    with engine.connect() as connection, pytest.raises(DBAPIError, match="append-only"):
+        connection.execute(text("UPDATE risk_decision SET verdict='REJECTED'"))
+    with engine.connect() as connection, pytest.raises(DBAPIError, match="append-only"):
+        connection.execute(text("UPDATE risk_config_snapshot SET leverage=10"))
+
+
+def test_risk_decision_reject_requires_reason_codes(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    _approve_signal(factory, 825)
+    run_risk_evaluation(
+        factory,
+        settings=_risk_settings(),
+        market_data_client=_FakeRiskMarketDataClient(None),
+        clock=lambda: RISK_NOW,
+    )
+
+    with factory() as session:
+        rejected = session.scalar(
+            select(RiskDecisionRow).where(RiskDecisionRow.verdict == "REJECTED")
+        )
+        assert rejected is not None
+        assert len(rejected.reason_codes) > 0
+
+    with (
+        engine.connect() as connection,
+        pytest.raises(IntegrityError, match="ck_risk_decision_reject_has_reasons"),
+        connection.begin(),
+    ):
+        connection.execute(
+            text(
+                "INSERT INTO risk_decision (decision_id, intent_id, verdict, reason_codes, "
+                "config_snapshot_id, expires_at) "
+                "SELECT 'bad-decision', intent_id, 'REJECTED', '[]'::jsonb, "
+                "(SELECT config_snapshot_id FROM risk_config_snapshot LIMIT 1), "
+                "now() + interval '1 hour' FROM trade_intent LIMIT 1"
+            )
+        )

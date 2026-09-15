@@ -697,3 +697,154 @@ class ThesisExtractionCheckpoint(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
+
+
+class RiskConfigSnapshot(Base):
+    """Versioned risk-rule parameters (BR-008/009/010/011), append-only.
+
+    Lets every `RiskDecision` be replayed against the exact numeric limits
+    that were live when it was made (Data Invariant #5's "config snapshot"
+    leg), same convention as `binance_symbol_snapshots`: newest row by
+    `effective_at` wins, nothing is ever mutated in place.
+
+    `equity_baseline_usdt` is a Slice-1 limitation, not real account data:
+    Risk Engine has no Binance credential and no Execution Gateway exists
+    yet to query a real account balance, so this is a configured value the
+    user sets directly -- see [phase-6/known-issues.md] for the full caveat.
+    """
+
+    __tablename__ = "risk_config_snapshot"
+    __table_args__ = (
+        CheckConstraint("leverage > 0", name="ck_risk_config_leverage_positive"),
+        CheckConstraint(
+            "max_concurrent_positions > 0", name="ck_risk_config_max_positions_positive"
+        ),
+    )
+
+    config_snapshot_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    leverage: Mapped[int] = mapped_column(Integer, nullable=False)
+    default_stop_roe_pct: Mapped[Decimal] = mapped_column(Numeric(5, 4), nullable=False)
+    max_single_trade_risk_pct: Mapped[Decimal] = mapped_column(Numeric(5, 4), nullable=False)
+    max_single_trade_initial_margin_pct: Mapped[Decimal] = mapped_column(
+        Numeric(5, 4), nullable=False
+    )
+    max_total_initial_margin_pct: Mapped[Decimal] = mapped_column(Numeric(5, 4), nullable=False)
+    max_concurrent_positions: Mapped[int] = mapped_column(Integer, nullable=False)
+    daily_loss_kill_switch_pct: Mapped[Decimal] = mapped_column(Numeric(5, 4), nullable=False)
+    max_source_age_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_receive_lag_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_price_deviation_bps: Mapped[int] = mapped_column(Integer, nullable=False)
+    equity_baseline_usdt: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    effective_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class TradeIntent(Base):
+    """One pre-order business intent, created from an `APPROVED` signal decision (FR-016).
+
+    `intent_id` is derived from `origin_event_id` alone, so re-processing
+    the same approved decision is naturally idempotent (NFR-002) -- the
+    same "hash of the thing that caused this row to exist" convention as
+    every other derived table. `stop_value` mirrors the approved decision's
+    own `approved_stop_value`: `None` means the signal never had an
+    author/edited stop and Risk Engine must compute the actual
+    `DEFAULT_ROE_30` price itself (`resolve_stop`'s docstring in
+    `signal_parser.py` explicitly deferred this here).
+    """
+
+    __tablename__ = "trade_intent"
+    __table_args__ = (
+        UniqueConstraint("origin_event_id", name="uq_trade_intent_origin_event"),
+        CheckConstraint("side IN ('LONG', 'SHORT')", name="ck_trade_intent_side_valid"),
+        CheckConstraint(
+            "entry_type IN ('MARKET', 'LIMIT', 'RANGE')", name="ck_trade_intent_entry_type_valid"
+        ),
+        CheckConstraint(
+            "status IN ('CREATED', 'RISK_APPROVED', 'RISK_REJECTED', 'SUBMITTED', "
+            "'EXPIRED', 'CANCELLED')",
+            name="ck_trade_intent_status_valid",
+        ),
+        Index("ix_trade_intent_signal_row_id", "signal_row_id"),
+    )
+
+    intent_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    origin_event_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("signal_decision_events.event_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    signal_row_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("normalized_signals.signal_row_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    channel_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    symbol: Mapped[str] = mapped_column(String(30), nullable=False)
+    side: Mapped[str] = mapped_column(String(10), nullable=False)
+    entry_type: Mapped[str] = mapped_column(String(10), nullable=False)
+    entry_values: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, server_default="[]")
+    stop_value: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    take_profits: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, server_default="[]")
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class RiskDecision(Base):
+    """One immutable, deterministic risk evaluation of a `TradeIntent` (FR-016).
+
+    `decision_id` is derived from `intent_id` alone -- exactly one current
+    decision per intent (Data Invariant, logical-data-model.md §3.5), no
+    revision indirection needed since `TradeIntent` itself is never revised
+    (a changed signal produces an entirely new `TradeIntent` via a new
+    `origin_event_id`, same as every other "new revision = new row"
+    convention in this project).
+
+    `equity_used`/`open_position_count_used`/`daily_realized_loss_pct_used`
+    are Slice-1 limitations: self-reported/configured inputs, not verified
+    against a real Binance account (no Execution Gateway exists yet to
+    query one). Recorded here anyway, exactly as used, so every decision
+    stays honestly replayable even though the underlying account truth is
+    not yet real -- see [phase-6/known-issues.md].
+    """
+
+    __tablename__ = "risk_decision"
+    __table_args__ = (
+        UniqueConstraint("intent_id", name="uq_risk_decision_intent"),
+        CheckConstraint(
+            "verdict IN ('APPROVED', 'REJECTED')", name="ck_risk_decision_verdict_valid"
+        ),
+        CheckConstraint(
+            "verdict = 'APPROVED' OR jsonb_array_length(reason_codes) > 0",
+            name="ck_risk_decision_reject_has_reasons",
+        ),
+    )
+
+    decision_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    intent_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("trade_intent.intent_id", ondelete="CASCADE"), nullable=False
+    )
+    verdict: Mapped[str] = mapped_column(String(10), nullable=False)
+    reason_codes: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default="[]")
+    computed_stop_price: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    quantity: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    entry_price_used: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    market_price: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    market_price_fetched_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    equity_used: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    open_position_count_used: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    daily_realized_loss_pct_used: Mapped[Decimal | None] = mapped_column(
+        Numeric(6, 4), nullable=True
+    )
+    config_snapshot_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("risk_config_snapshot.config_snapshot_id"), nullable=False
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )

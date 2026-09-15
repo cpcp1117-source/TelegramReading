@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 import httpx
@@ -18,6 +20,7 @@ from telegram_trader.normalization import ExchangeSnapshot
 LOGGER = logging.getLogger(__name__)
 
 _EXCHANGE_INFO_PATH = "/fapi/v1/exchangeInfo"
+_MARK_PRICE_PATH = "/fapi/v1/premiumIndex"
 _ACTIVE_STATUS = "TRADING"
 _PERPETUAL_CONTRACT_TYPE = "PERPETUAL"
 
@@ -25,11 +28,12 @@ _PERPETUAL_CONTRACT_TYPE = "PERPETUAL"
 class BinanceMarketDataClient:
     """Thin synchronous wrapper over Binance's public USD(S)-M futures market data.
 
-    No API key is used or accepted -- `exchangeInfo` is a public endpoint.
-    Exposes exactly the one method production code calls, matching this
-    project's `FakeXClient` test convention (a `FakeMarketDataClient`
-    implementing only `get_exchange_info` can stand in for this class in
-    tests, no mocking library needed).
+    No API key is used or accepted -- `exchangeInfo` and `premiumIndex` (mark
+    price) are both public endpoints, per api-contract-inventory.md's public
+    endpoint list. Exposes exactly the methods production code calls,
+    matching this project's `FakeXClient` test convention (a
+    `FakeMarketDataClient` implementing only these methods can stand in for
+    this class in tests, no mocking library needed).
     """
 
     def __init__(self, http_client: httpx.Client) -> None:
@@ -37,6 +41,19 @@ class BinanceMarketDataClient:
 
     def get_exchange_info(self) -> dict[str, Any]:
         response = self._http_client.get(_EXCHANGE_INFO_PATH, timeout=10.0)
+        response.raise_for_status()
+        result: dict[str, Any] = response.json()
+        return result
+
+    def get_mark_price(self, symbol: str) -> dict[str, Any]:
+        """One symbol's current mark price -- Risk Engine's freshness/sizing input.
+
+        Distinct from `exchangeInfo` (symbol metadata, no price at all):
+        this is the `market_snapshot` entity system-spec.md deferred to
+        Phase 6 (see migration `0011`'s own docstring). Mark price, not last
+        trade price, matches Binance's own liquidation/margin math.
+        """
+        response = self._http_client.get(_MARK_PRICE_PATH, params={"symbol": symbol}, timeout=10.0)
         response.raise_for_status()
         result: dict[str, Any] = response.json()
         return result
@@ -134,3 +151,38 @@ def load_latest_snapshot(
     if age_seconds > max_age_seconds:
         return None
     return ExchangeSnapshot(fetched_at=row.fetched_at, active_symbols=frozenset(row.active_symbols))
+
+
+@dataclass(frozen=True, slots=True)
+class MarketPriceQuote:
+    """One point-in-time mark-price observation -- Risk Engine's freshness/sizing input.
+
+    Not persisted as its own versioned table (unlike `binance_symbol_snapshots`):
+    a `risk_decision` row is itself already immutable and append-only, so
+    recording `market_price`/`market_price_fetched_at` directly on it is
+    sufficient for replay (Data Invariant #5) without a redundant snapshot
+    table nothing else would ever read.
+    """
+
+    symbol: str
+    price: Decimal
+    fetched_at: datetime
+
+
+def fetch_mark_price(
+    client: Any,
+    symbol: str,
+    *,
+    clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> MarketPriceQuote:
+    """Fetch one symbol's current mark price. Raises on any malformed response --
+
+    fail closed, never silently substitute a stale or default price for a
+    Risk Engine sizing/freshness decision (BR-012).
+    """
+    fetched_at = clock()
+    payload = client.get_mark_price(symbol)
+    raw_price = payload.get("markPrice")
+    if raw_price is None:
+        raise ValueError(f"Binance premiumIndex response for {symbol!r} has no markPrice")
+    return MarketPriceQuote(symbol=symbol, price=Decimal(str(raw_price)), fetched_at=fetched_at)

@@ -58,4 +58,4 @@ This mirrors Phase 5's decision record almost exactly and is proposed here for t
 
 ## Current Decision
 
-Phase 6 kickoff scope is drafted above, per the user's authorization to begin planning (2026-09-14). No branch created, no code written yet, no Binance Testnet credential created yet. Next step: the user's decision on the open questions above, especially the proposed Risk-Engine-first slice order and TBD-003's risk-math formula — then detailed Explore-agent research and planning specifically for whichever slice is confirmed first.
+Phase 6 kickoff scope is drafted above, per the user's authorization to begin planning (2026-09-14). **Slice order confirmed by the user (2026-09-15): Risk Engine first (Slice 1), Execution Gateway after (Slice 2+)** — no Binance Testnet credential is touched until Slice 1 is fully verified. No branch created, no code written yet. Next step: detailed Slice 1 planning (trigger point, data flow, golden/negative fixture design) — see the Slice 1 planning note this triggers.

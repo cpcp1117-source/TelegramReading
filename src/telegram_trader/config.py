@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -140,6 +141,95 @@ class Settings(BaseSettings):
         gt=0,
         validation_alias=AliasChoices("THESIS_BATCH_SIZE", "APP_THESIS_BATCH_SIZE"),
     )
+    # Phase 6 Slice 1 -- Risk Engine (FR-016). Numeric defaults below are the
+    # spec's own fixed BR-006/007/008/009/010/011 values, not arbitrary --
+    # see system-spec.md. `risk_equity_baseline_usdt` has no sensible
+    # universal default (it's a real account-shaped number) and is
+    # deliberately required, not defaulted -- same convention as
+    # `POSTGRES_PASSWORD` having no default.
+    risk_leverage: int = Field(
+        default=5, gt=0, validation_alias=AliasChoices("RISK_LEVERAGE", "APP_RISK_LEVERAGE")
+    )
+    risk_default_stop_roe_pct: Decimal = Field(
+        default=Decimal("0.30"),
+        gt=0,
+        validation_alias=AliasChoices("RISK_DEFAULT_STOP_ROE_PCT", "APP_RISK_DEFAULT_STOP_ROE_PCT"),
+    )
+    risk_max_single_trade_risk_pct: Decimal = Field(
+        default=Decimal("0.03"),
+        gt=0,
+        validation_alias=AliasChoices(
+            "RISK_MAX_SINGLE_TRADE_RISK_PCT", "APP_RISK_MAX_SINGLE_TRADE_RISK_PCT"
+        ),
+    )
+    risk_max_single_trade_initial_margin_pct: Decimal = Field(
+        default=Decimal("0.10"),
+        gt=0,
+        validation_alias=AliasChoices(
+            "RISK_MAX_SINGLE_TRADE_INITIAL_MARGIN_PCT",
+            "APP_RISK_MAX_SINGLE_TRADE_INITIAL_MARGIN_PCT",
+        ),
+    )
+    risk_max_total_initial_margin_pct: Decimal = Field(
+        default=Decimal("0.30"),
+        gt=0,
+        validation_alias=AliasChoices(
+            "RISK_MAX_TOTAL_INITIAL_MARGIN_PCT", "APP_RISK_MAX_TOTAL_INITIAL_MARGIN_PCT"
+        ),
+    )
+    risk_max_concurrent_positions: int = Field(
+        default=3,
+        gt=0,
+        validation_alias=AliasChoices(
+            "RISK_MAX_CONCURRENT_POSITIONS", "APP_RISK_MAX_CONCURRENT_POSITIONS"
+        ),
+    )
+    risk_daily_loss_kill_switch_pct: Decimal = Field(
+        default=Decimal("0.06"),
+        gt=0,
+        validation_alias=AliasChoices(
+            "RISK_DAILY_LOSS_KILL_SWITCH_PCT", "APP_RISK_DAILY_LOSS_KILL_SWITCH_PCT"
+        ),
+    )
+    risk_max_source_age_seconds: int = Field(
+        default=60,
+        gt=0,
+        validation_alias=AliasChoices(
+            "RISK_MAX_SOURCE_AGE_SECONDS", "APP_RISK_MAX_SOURCE_AGE_SECONDS"
+        ),
+    )
+    risk_max_receive_lag_seconds: int = Field(
+        default=10,
+        gt=0,
+        validation_alias=AliasChoices(
+            "RISK_MAX_RECEIVE_LAG_SECONDS", "APP_RISK_MAX_RECEIVE_LAG_SECONDS"
+        ),
+    )
+    risk_max_price_deviation_bps: int = Field(
+        default=50,
+        gt=0,
+        validation_alias=AliasChoices(
+            "RISK_MAX_PRICE_DEVIATION_BPS", "APP_RISK_MAX_PRICE_DEVIATION_BPS"
+        ),
+    )
+    risk_equity_baseline_usdt: Decimal | None = Field(
+        default=None,
+        validation_alias=AliasChoices("RISK_EQUITY_BASELINE_USDT", "APP_RISK_EQUITY_BASELINE_USDT"),
+    )
+    risk_decision_expiry_seconds: float = Field(
+        default=300.0,
+        gt=0,
+        validation_alias=AliasChoices(
+            "RISK_DECISION_EXPIRY_SECONDS", "APP_RISK_DECISION_EXPIRY_SECONDS"
+        ),
+    )
+
+    @field_validator("risk_equity_baseline_usdt")
+    @classmethod
+    def validate_risk_equity_baseline(cls, value: Decimal | None) -> Decimal | None:
+        if value is not None and value <= 0:
+            raise ValueError("risk equity baseline must be positive")
+        return value
 
     @field_validator("database_url")
     @classmethod
