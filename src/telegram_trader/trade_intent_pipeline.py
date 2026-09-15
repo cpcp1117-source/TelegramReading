@@ -40,6 +40,7 @@ from telegram_trader.models import (
 from telegram_trader.models import RiskDecision as RiskDecisionRow
 from telegram_trader.models import TradeIntent as TradeIntentRow
 from telegram_trader.risk_engine import (
+    REASON_SIGNAL_NOT_VALIDATED,
     AccountState,
     RiskConfig,
     RiskEvaluation,
@@ -305,12 +306,51 @@ def run_risk_evaluation(
         for event, signal, raw_message in pending:
             intent_id = _intent_id_for_event(event.event_id)
             if signal.symbol is None or signal.side is None or signal.entry_type is None:
-                # Defensive, should not happen: only a VALIDATED signal's decision can
-                # be APPROVED, and VALIDATED requires a resolved symbol/side/entry_type.
-                # Fail closed rather than assume, per BR-012.
+                # Defensive, should not happen: even a NEW (unresolved-symbol) signal
+                # already has symbol/side populated by the parser (see the
+                # SIGNAL_NOT_VALIDATED case below) -- this guards against a
+                # genuinely null field, not against an unresolved one.
                 LOGGER.error(
                     "approved signal decision missing symbol/side/entry_type; skipping",
                     extra={"context": {"event_id": event.event_id, "intent_id": intent_id}},
+                )
+                continue
+            if signal.status != "VALIDATED":
+                # Real gap found running this against the real database: the Control
+                # Bot notifies (and the user may approve) both NEW and VALIDATED
+                # signals (signal_decisions.load_pending_signals), but only VALIDATED
+                # means the symbol actually resolved against real market data. A NEW
+                # signal's `symbol` can be bare, unresolved candidate text (e.g. "LSK"
+                # instead of "LSKUSDT") -- not a real ticker, and Binance's own API
+                # would 400 on it. Reject explicitly rather than let a confusing raw
+                # HTTP error stand in for the real reason.
+                evaluation = RiskEvaluation(
+                    verdict="REJECTED",
+                    reason_codes=[REASON_SIGNAL_NOT_VALIDATED],
+                    computed_stop_price=None,
+                    quantity=None,
+                    entry_price_used=None,
+                )
+                intent = _create_trade_intent(session, event, signal, status="RISK_REJECTED")
+                _record_risk_decision(
+                    session,
+                    intent,
+                    evaluation,
+                    market_quote=MarketPriceQuote(
+                        symbol=signal.symbol, price=Decimal(0), fetched_at=now
+                    ),
+                    account=account,
+                    config_snapshot_id=config_row.config_snapshot_id,
+                    now=now,
+                    expiry_seconds=settings.risk_decision_expiry_seconds,
+                )
+                results.append(
+                    RiskPipelineResult(
+                        intent_id=intent.intent_id,
+                        symbol=signal.symbol,
+                        verdict=evaluation.verdict,
+                        reason_codes=evaluation.reason_codes,
+                    )
                 )
                 continue
             try:

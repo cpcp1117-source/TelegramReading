@@ -2400,6 +2400,69 @@ def test_run_risk_evaluation_is_idempotent(engine: Engine) -> None:
         )
 
 
+def test_run_risk_evaluation_rejects_approved_but_never_validated_signal(engine: Engine) -> None:
+    """Real gap found running this against the real database (see risk_engine.py's
+
+    REASON_SIGNAL_NOT_VALIDATED): the Control Bot notifies (and the user may
+    approve) both NEW and VALIDATED signals, but only VALIDATED means the
+    symbol actually resolved against real market data -- a NEW dynamic-scope
+    signal's `symbol` can be bare, unresolved text (e.g. "ARB", not "ARBUSDT"),
+    which Binance's own price endpoint would reject with a raw HTTP 400 if
+    ever queried. Must be rejected explicitly before ever calling out.
+    """
+    factory = create_session_factory(engine)
+    with factory.begin() as session:
+        session.add(
+            _channel_policy(
+                channel_id=826,
+                topic_id=0,
+                channel_type="EXECUTION_SIGNAL",
+                symbol_scope_mode="BINANCE_USDM_ACTIVE_PERPETUAL",
+                automation_authorization="GRANTED",
+                gate_decision="ENABLED",
+            )
+        )
+    _run_pipeline(factory, 826, message_id=1, text="ARB 空 市價進場附近0.1950")
+    run_signal_parsing(factory)
+    with factory() as session:
+        row = session.scalar(
+            select(NormalizedSignalRow).where(NormalizedSignalRow.channel_id == 826)
+        )
+        assert row is not None
+        assert row.status == "NEW"  # never resolved -- no Binance snapshot in this test
+
+    with factory.begin() as session:
+        (signal,) = load_pending_signals(session, now=RISK_NOW)
+        create_request(session, signal, nonce="nonce-notvalidated", telegram_message_id=42)
+        request_id = request_id_for_signal_row(signal.signal_row_id)
+    with factory.begin() as session:
+        outcome = record_decision(
+            session,
+            request_id=request_id,
+            actor_user_id=555,
+            callback_query_id="cbq-notvalidated",
+            action="APPROVE",
+            now=RISK_NOW,
+        )
+    assert outcome == "APPROVED"
+
+    market_client = _FakeRiskMarketDataClient(Decimal("100"))
+    results = run_risk_evaluation(
+        factory,
+        settings=_risk_settings(),
+        market_data_client=market_client,
+        clock=lambda: RISK_NOW,
+    )
+
+    assert len(results) == 1
+    assert results[0].verdict == "REJECTED"
+    assert results[0].reason_codes == ["SIGNAL_NOT_VALIDATED"]
+    with factory() as session:
+        intent = session.scalar(select(TradeIntentRow).where(TradeIntentRow.channel_id == 826))
+        assert intent is not None
+        assert intent.status == "RISK_REJECTED"
+
+
 def test_run_risk_evaluation_rejects_when_mark_price_unavailable(engine: Engine) -> None:
     factory = create_session_factory(engine)
     _approve_signal(factory, 822)
