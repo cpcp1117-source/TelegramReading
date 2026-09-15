@@ -67,6 +67,28 @@ def test_blank_component_password_is_rejected() -> None:
         Settings(database_password=SecretStr(""))
 
 
+def test_blank_optional_secrets_are_coerced_to_none() -> None:
+    """Unlike the database password, a present-but-blank optional secret
+
+    (e.g. an unset `.env` key Compose still passes through as `""`) must not
+    be a validation error -- see config.py's `blank_optional_secret_to_none`.
+    """
+    settings = Settings(
+        openai_api_key=SecretStr(""),
+        telegram_api_hash=SecretStr(""),
+        control_bot_token=SecretStr(""),
+    )
+    assert settings.openai_api_key is None
+    assert settings.telegram_api_hash is None
+    assert settings.control_bot_token is None
+
+
+def test_blank_risk_equity_baseline_is_coerced_to_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RISK_EQUITY_BASELINE_USDT", "")
+    settings = Settings()
+    assert settings.risk_equity_baseline_usdt is None
+
+
 def test_cached_settings_can_be_loaded() -> None:
     get_settings.cache_clear()
     assert get_settings().environment == "offline"

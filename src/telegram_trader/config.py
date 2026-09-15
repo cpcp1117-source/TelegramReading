@@ -224,6 +224,20 @@ class Settings(BaseSettings):
         ),
     )
 
+    @field_validator("risk_equity_baseline_usdt", mode="before")
+    @classmethod
+    def blank_risk_equity_baseline_to_none(cls, value: object) -> object:
+        """A present-but-blank env var (e.g. Compose's `${VAR:-}` passthrough of an
+
+        unset `.env` key) must mean "not configured", the same as the key
+        being absent entirely -- not a decimal-parsing error on `""`. Must
+        run `mode="before"`: Pydantic's own `Decimal` coercion would reject
+        an empty string before any `mode="after"` validator ever saw it.
+        """
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
     @field_validator("risk_equity_baseline_usdt")
     @classmethod
     def validate_risk_equity_baseline(cls, value: Decimal | None) -> Decimal | None:
@@ -264,29 +278,35 @@ class Settings(BaseSettings):
     @field_validator("database_password")
     @classmethod
     def validate_non_empty_database_password(cls, value: SecretStr | None) -> SecretStr | None:
+        """Deliberately still rejects blank rather than coercing to `None`
+
+        (unlike the Telegram/Control Bot/OpenAI secrets below): a database
+        password silently becoming "unset" is a materially different, more
+        consequential failure mode than an unused AI credential being unset.
+        Docker Compose's own `${POSTGRES_PASSWORD:?...}` required
+        substitution already guards the real deployment path before this
+        even runs; this validator is the defense-in-depth backstop for
+        anything constructing `Settings` directly.
+        """
         if value is not None and not value.get_secret_value():
             raise ValueError("database password cannot be blank")
         return value
 
-    @field_validator("telegram_api_hash")
+    @field_validator("telegram_api_hash", "control_bot_token", "openai_api_key")
     @classmethod
-    def validate_non_empty_telegram_api_hash(cls, value: SecretStr | None) -> SecretStr | None:
-        if value is not None and not value.get_secret_value().strip():
-            raise ValueError("Telegram API hash cannot be blank")
-        return value
+    def blank_optional_secret_to_none(cls, value: SecretStr | None) -> SecretStr | None:
+        """A present-but-blank secret (e.g. an unset `.env` key passed through
 
-    @field_validator("control_bot_token")
-    @classmethod
-    def validate_non_empty_control_bot_token(cls, value: SecretStr | None) -> SecretStr | None:
+        Compose's `${VAR:-}`) means "not configured", same as an absent key
+        -- never a validation error here. Whatever actually *requires* the
+        value present (the `model_validator` below, for the environments
+        that need it) still enforces that in its own context; this just
+        stops an unrelated context (e.g. `app` running `environment=offline`,
+        which never needs `OPENAI_API_KEY`) from being broken by a field it
+        doesn't even use.
+        """
         if value is not None and not value.get_secret_value().strip():
-            raise ValueError("Control Bot token cannot be blank")
-        return value
-
-    @field_validator("openai_api_key")
-    @classmethod
-    def validate_non_empty_openai_api_key(cls, value: SecretStr | None) -> SecretStr | None:
-        if value is not None and not value.get_secret_value().strip():
-            raise ValueError("OpenAI API key cannot be blank")
+            return None
         return value
 
     @field_validator("thesis_model")
