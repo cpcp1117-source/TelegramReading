@@ -20,6 +20,20 @@ TBD-003 (system-spec.md): the ROE-to-stop-price formula implemented here
 not account for fees, funding, maintenance margin, or a slippage buffer --
 those remain genuinely unresolved, not silently assumed away. See
 docs/phase-6/known-issues.md.
+
+BR-006 freshness, revised (P6-LIMIT-004): a raw elapsed-time check against
+the signal's own post time was found to reject nearly every real signal
+under this project's still-manual approval workflow (BR-002) -- a human
+reasonably takes longer than the original 60-second window to see a
+notification and tap Approve, and that delay says nothing about whether
+the trade is still safe. Replaced with BR-006's own price-deviation leg
+for `MARKET` entries: compare the price near the signal's original post
+time against the current price, and reject only if the market actually
+moved too much, regardless of how much time passed. A five-minute-old
+approval on an unmoved price is fine; a ten-second-old approval after a
+sharp move is not. `max_receive_lag_seconds` is unchanged -- that measures
+this project's own collector keeping up, an unrelated infrastructure
+health question, not the human-approval-delay problem this replaces.
 """
 
 from __future__ import annotations
@@ -34,7 +48,8 @@ Verdict = str  # "APPROVED" | "REJECTED"
 
 REASON_STALE_MARKET_DATA = "STALE_MARKET_DATA"
 REASON_SIGNAL_NOT_VALIDATED = "SIGNAL_NOT_VALIDATED"
-REASON_SOURCE_TOO_OLD = "SOURCE_TOO_OLD"
+REASON_REFERENCE_PRICE_UNAVAILABLE = "REFERENCE_PRICE_UNAVAILABLE"
+REASON_PRICE_DEVIATION_TOO_HIGH = "PRICE_DEVIATION_TOO_HIGH"
 REASON_RECEIVE_LAG_TOO_HIGH = "RECEIVE_LAG_TOO_HIGH"
 REASON_DAILY_LOSS_KILL_SWITCH = "DAILY_LOSS_KILL_SWITCH"
 REASON_SYMBOL_CONFLICT = "SYMBOL_CONFLICT"
@@ -54,7 +69,6 @@ class RiskConfig:
     max_total_initial_margin_pct: Decimal
     max_concurrent_positions: int
     daily_loss_kill_switch_pct: Decimal
-    max_source_age_seconds: int
     max_receive_lag_seconds: int
     max_price_deviation_bps: int
     equity_baseline_usdt: Decimal
@@ -169,12 +183,19 @@ def evaluate_trade_intent(
     config: RiskConfig,
     account: AccountState,
     market_price: Decimal | None,
+    reference_price: Decimal | None,
     now: datetime,
 ) -> RiskEvaluation:
     """Deterministic, fixed-rule evaluation (FR-016). Never raises for a bad intent --
 
     every failure mode is an explicit `REJECTED` reason code, not an
     exception, so a caller always gets a recordable `RiskEvaluation`.
+
+    `reference_price` is the price near the signal's original post time
+    (BR-006's price-deviation leg for `MARKET` entries only -- see the
+    module docstring's "BR-006 freshness, revised" note); ignored for
+    `LIMIT`/`RANGE`, which anchor to the signal's own stated price instead
+    of live market conditions.
     """
     reasons: list[str] = []
 
@@ -196,15 +217,17 @@ def evaluate_trade_intent(
             entry_price_used=None,
         )
 
-    source_age_seconds = (now - intent.signal_source_date).total_seconds()
-    if source_age_seconds > config.max_source_age_seconds:
-        reasons.append(REASON_SOURCE_TOO_OLD)
+    if intent.entry_type == "MARKET":
+        if reference_price is None:
+            reasons.append(REASON_REFERENCE_PRICE_UNAVAILABLE)
+        elif reference_price > 0:
+            deviation_bps = abs(market_price - reference_price) / reference_price * Decimal(10000)
+            if deviation_bps > config.max_price_deviation_bps:
+                reasons.append(REASON_PRICE_DEVIATION_TOO_HIGH)
+
     receive_lag_seconds = (intent.signal_received_at - intent.signal_source_date).total_seconds()
     if receive_lag_seconds > config.max_receive_lag_seconds:
         reasons.append(REASON_RECEIVE_LAG_TOO_HIGH)
-    # BR-006's price-deviation leg is not implemented in Slice 1: no reference
-    # price is captured at signal-receive time to deviate from -- see
-    # docs/phase-6/known-issues.md rather than fabricate a comparison.
 
     existing_side = account.open_position_sides.get(intent.symbol)
     if existing_side is not None and existing_side != intent.side:

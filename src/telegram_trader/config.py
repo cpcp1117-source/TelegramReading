@@ -191,13 +191,6 @@ class Settings(BaseSettings):
             "RISK_DAILY_LOSS_KILL_SWITCH_PCT", "APP_RISK_DAILY_LOSS_KILL_SWITCH_PCT"
         ),
     )
-    risk_max_source_age_seconds: int = Field(
-        default=60,
-        gt=0,
-        validation_alias=AliasChoices(
-            "RISK_MAX_SOURCE_AGE_SECONDS", "APP_RISK_MAX_SOURCE_AGE_SECONDS"
-        ),
-    )
     risk_max_receive_lag_seconds: int = Field(
         default=10,
         gt=0,

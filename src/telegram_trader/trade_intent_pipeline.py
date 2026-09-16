@@ -28,7 +28,11 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session, sessionmaker
 
-from telegram_trader.binance_market_data import MarketPriceQuote, fetch_mark_price
+from telegram_trader.binance_market_data import (
+    MarketPriceQuote,
+    fetch_mark_price,
+    fetch_reference_price,
+)
 from telegram_trader.config import Settings
 from telegram_trader.models import (
     NormalizedSignal,
@@ -86,7 +90,6 @@ def risk_config_from_settings(settings: Settings) -> RiskConfig:
         max_total_initial_margin_pct=settings.risk_max_total_initial_margin_pct,
         max_concurrent_positions=settings.risk_max_concurrent_positions,
         daily_loss_kill_switch_pct=settings.risk_daily_loss_kill_switch_pct,
-        max_source_age_seconds=settings.risk_max_source_age_seconds,
         max_receive_lag_seconds=settings.risk_max_receive_lag_seconds,
         max_price_deviation_bps=settings.risk_max_price_deviation_bps,
         equity_baseline_usdt=settings.risk_equity_baseline_usdt,
@@ -121,7 +124,6 @@ def get_or_create_risk_config_snapshot(
         config.max_total_initial_margin_pct,
         config.max_concurrent_positions,
         config.daily_loss_kill_switch_pct,
-        config.max_source_age_seconds,
         config.max_receive_lag_seconds,
         config.max_price_deviation_bps,
         config.equity_baseline_usdt,
@@ -141,7 +143,6 @@ def get_or_create_risk_config_snapshot(
             max_total_initial_margin_pct=config.max_total_initial_margin_pct,
             max_concurrent_positions=config.max_concurrent_positions,
             daily_loss_kill_switch_pct=config.daily_loss_kill_switch_pct,
-            max_source_age_seconds=config.max_source_age_seconds,
             max_receive_lag_seconds=config.max_receive_lag_seconds,
             max_price_deviation_bps=config.max_price_deviation_bps,
             equity_baseline_usdt=config.equity_baseline_usdt,
@@ -366,6 +367,18 @@ def run_risk_evaluation(
                 )
                 market_price = None
 
+            reference_price: Decimal | None = None
+            if signal.entry_type == "MARKET":
+                try:
+                    reference_price = fetch_reference_price(
+                        market_data_client, signal.symbol, at=raw_message.source_date
+                    )
+                except Exception:
+                    LOGGER.exception(
+                        "risk engine could not fetch reference price; failing closed",
+                        extra={"context": {"symbol": signal.symbol, "intent_id": intent_id}},
+                    )
+
             entry_values = [Decimal(v) for v in (signal.entry_values or [])]
             stop_value = event.approved_stop_value
             intent_input = TradeIntentInput(
@@ -382,6 +395,7 @@ def run_risk_evaluation(
                 config=config,
                 account=account,
                 market_price=market_price,
+                reference_price=reference_price,
                 now=now,
             )
             resolved_status = (

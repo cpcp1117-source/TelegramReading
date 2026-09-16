@@ -731,7 +731,6 @@ class RiskConfigSnapshot(Base):
     max_total_initial_margin_pct: Mapped[Decimal] = mapped_column(Numeric(5, 4), nullable=False)
     max_concurrent_positions: Mapped[int] = mapped_column(Integer, nullable=False)
     daily_loss_kill_switch_pct: Mapped[Decimal] = mapped_column(Numeric(5, 4), nullable=False)
-    max_source_age_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
     max_receive_lag_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
     max_price_deviation_bps: Mapped[int] = mapped_column(Integer, nullable=False)
     equity_baseline_usdt: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)

@@ -21,6 +21,7 @@ LOGGER = logging.getLogger(__name__)
 
 _EXCHANGE_INFO_PATH = "/fapi/v1/exchangeInfo"
 _MARK_PRICE_PATH = "/fapi/v1/premiumIndex"
+_KLINES_PATH = "/fapi/v1/klines"
 _ACTIVE_STATUS = "TRADING"
 _PERPETUAL_CONTRACT_TYPE = "PERPETUAL"
 
@@ -56,6 +57,21 @@ class BinanceMarketDataClient:
         response = self._http_client.get(_MARK_PRICE_PATH, params={"symbol": symbol}, timeout=10.0)
         response.raise_for_status()
         result: dict[str, Any] = response.json()
+        return result
+
+    def get_klines(self, symbol: str, *, start_time_ms: int, limit: int = 1) -> list[list[Any]]:
+        """1-minute klines starting at `start_time_ms` -- BR-006's price-deviation
+
+        reference. Public `/fapi/v1/klines`, no credential. Each row's index
+        4 is that minute's close price (string).
+        """
+        response = self._http_client.get(
+            _KLINES_PATH,
+            params={"symbol": symbol, "interval": "1m", "startTime": start_time_ms, "limit": limit},
+            timeout=10.0,
+        )
+        response.raise_for_status()
+        result: list[list[Any]] = response.json()
         return result
 
     def close(self) -> None:
@@ -186,3 +202,21 @@ def fetch_mark_price(
     if raw_price is None:
         raise ValueError(f"Binance premiumIndex response for {symbol!r} has no markPrice")
     return MarketPriceQuote(symbol=symbol, price=Decimal(str(raw_price)), fetched_at=fetched_at)
+
+
+def fetch_reference_price(client: Any, symbol: str, *, at: datetime) -> Decimal:
+    """The 1-minute kline close price nearest to `at` -- BR-006's price-deviation
+
+    reference point for a MARKET-entry signal. Replaces a raw elapsed-time
+    freshness check (see risk_engine.py's `evaluate_trade_intent`): a signal
+    approved several minutes after posting is not inherently unsafe if the
+    price barely moved in that window, and a signal approved within seconds
+    can still be unsafe if the price already jumped. Raises on any
+    malformed/empty response -- fail closed (BR-012), same convention as
+    `fetch_mark_price`.
+    """
+    start_time_ms = int(at.timestamp() * 1000)
+    rows = client.get_klines(symbol, start_time_ms=start_time_ms, limit=1)
+    if not rows or len(rows[0]) < 5:
+        raise ValueError(f"Binance klines response for {symbol!r} at {at.isoformat()} is empty")
+    return Decimal(str(rows[0][4]))

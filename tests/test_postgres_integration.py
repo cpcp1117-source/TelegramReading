@@ -2300,6 +2300,15 @@ class _FakeRiskMarketDataClient:
             return {}  # no markPrice key -- fetch_mark_price raises, pipeline fails closed
         return {"markPrice": str(self._price)}
 
+    def get_klines(self, symbol: str, *, start_time_ms: int, limit: int = 1) -> list[list[object]]:
+        if self._price is None:
+            return []  # empty -- fetch_reference_price raises, pipeline fails closed
+        # Same price as get_mark_price -- zero deviation, so tests that only
+        # care about some other rule don't incidentally trip BR-006 too.
+        return [
+            [start_time_ms, str(self._price), str(self._price), str(self._price), str(self._price)]
+        ]
+
 
 def _risk_settings(equity: Decimal = Decimal("10000")) -> Settings:
     return Settings(risk_equity_baseline_usdt=equity)
