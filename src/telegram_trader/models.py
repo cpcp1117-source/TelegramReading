@@ -724,11 +724,7 @@ class RiskConfigSnapshot(Base):
     config_snapshot_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     leverage: Mapped[int] = mapped_column(Integer, nullable=False)
     default_stop_roe_pct: Mapped[Decimal] = mapped_column(Numeric(5, 4), nullable=False)
-    max_single_trade_risk_pct: Mapped[Decimal] = mapped_column(Numeric(5, 4), nullable=False)
-    max_single_trade_initial_margin_pct: Mapped[Decimal] = mapped_column(
-        Numeric(5, 4), nullable=False
-    )
-    max_total_initial_margin_pct: Mapped[Decimal] = mapped_column(Numeric(5, 4), nullable=False)
+    position_size_pct: Mapped[Decimal] = mapped_column(Numeric(5, 4), nullable=False)
     max_concurrent_positions: Mapped[int] = mapped_column(Integer, nullable=False)
     daily_loss_kill_switch_pct: Mapped[Decimal] = mapped_column(Numeric(5, 4), nullable=False)
     max_receive_lag_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -844,6 +840,308 @@ class RiskDecision(Base):
         String(64), ForeignKey("risk_config_snapshot.config_snapshot_id"), nullable=False
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class OrderLifecycle(Base):
+    """One state-machine transition for an approved `TradeIntent`'s real-order journey
+
+    (FR-017/018/019, Phase 6 Slice 2a). Append-only, one row per *transition* --
+    same "append revisions" convention this project already uses for
+    `risk_config_snapshot`/`normalized_signal`, and the same pattern
+    logical-data-model.md's own Entity Overview prescribes for
+    `system_control_state`'s sibling "current state" entity. The current
+    state of one intent's execution is whichever row has the highest
+    `revision` for that `intent_id` -- never an UPDATE in place. `state`
+    mirrors logical-data-model.md §4's Mermaid state machine exactly, not
+    an independently invented one.
+    """
+
+    __tablename__ = "order_lifecycle"
+    __table_args__ = (
+        UniqueConstraint("intent_id", "revision", name="uq_order_lifecycle_intent_revision"),
+        CheckConstraint("environment = 'TESTNET'", name="ck_order_lifecycle_environment_testnet"),
+        CheckConstraint("side IN ('LONG', 'SHORT')", name="ck_order_lifecycle_side_valid"),
+        CheckConstraint(
+            # 'PROTECTION_FAILED' added 2026-09-29: the terminal state when a stop
+            # order cannot be confirmed and -- per explicit user request -- this
+            # module does NOT auto-close the position, only notifies. Distinct
+            # from 'EMERGENCY_CLOSING'/'CLOSED', which stay valid for a possible
+            # future manual close command but are no longer reached automatically.
+            "state IN ('PENDING_SUBMIT', 'SUBMITTED', 'PARTIALLY_FILLED', 'FILLED', "
+            "'PROTECTION_PENDING', 'PROTECTED', 'PROTECTION_FAILED', 'EMERGENCY_CLOSING', "
+            "'CLOSING', 'CLOSED', 'FAILED_RECONCILIATION')",
+            name="ck_order_lifecycle_state_valid",
+        ),
+        Index("ix_order_lifecycle_intent_id", "intent_id"),
+    )
+
+    lifecycle_row_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    intent_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("trade_intent.intent_id", ondelete="CASCADE"), nullable=False
+    )
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    decision_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("risk_decision.decision_id"), nullable=False
+    )
+    environment: Mapped[str] = mapped_column(String(10), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(30), nullable=False)
+    side: Mapped[str] = mapped_column(String(10), nullable=False)
+    entry_client_order_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    state: Mapped[str] = mapped_column(String(30), nullable=False)
+    transition_reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    protection_deadline: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    correlation_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    reconciled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    transitioned_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class ExchangeOrder(Base):
+    """One real Binance order (FR-017/018, Phase 6 Slice 2a) -- entry, protection, or
+
+    emergency-close leg. Unlike `OrderLifecycle`, this row *is* mutated in
+    place (`status`/`filled_quantity`/`avg_fill_price`/`last_checked_at`) as
+    the same real exchange order is re-queried over time -- there is no
+    "revision" concept for a single exchange order identity, and the full
+    fill history is separately preserved, immutably, in `Fill`. This
+    asymmetry with the rest of this file's append-only convention is
+    deliberate, not an oversight: it mirrors what a real Binance order
+    object actually is (one mutable resource Binance itself updates), not
+    a domain event this system originates.
+    """
+
+    __tablename__ = "exchange_order"
+    __table_args__ = (
+        UniqueConstraint("client_order_id", name="uq_exchange_order_client_order_id"),
+        CheckConstraint(
+            # 'TAKE_PROFIT' added 2026-09-29 alongside the take-profit-order feature.
+            "purpose IN ('ENTRY', 'PROTECTION', 'TAKE_PROFIT', 'EMERGENCY_CLOSE')",
+            name="ck_exchange_order_purpose_valid",
+        ),
+        CheckConstraint("side IN ('BUY', 'SELL')", name="ck_exchange_order_side_valid"),
+        CheckConstraint(
+            "order_type IN ('MARKET', 'LIMIT', 'STOP_MARKET', 'TAKE_PROFIT_MARKET')",
+            name="ck_exchange_order_type_valid",
+        ),
+        CheckConstraint("position_side = 'BOTH'", name="ck_exchange_order_position_side_valid"),
+        CheckConstraint(
+            "working_type IS NULL OR working_type IN ('CONTRACT_PRICE', 'MARK_PRICE')",
+            name="ck_exchange_order_working_type_valid",
+        ),
+        CheckConstraint(
+            # Binance's own real order-status vocabulary (not this project's
+            # `OrderLifecycle.state` FSM) -- 'UNKNOWN' is this module's own
+            # sentinel for FR-018's "network failure, don't know if it went
+            # through" case, never something Binance itself returns.
+            "status IN ('NEW', 'PARTIALLY_FILLED', 'FILLED', 'CANCELED', 'PENDING_CANCEL', "
+            "'REJECTED', 'EXPIRED', 'EXPIRED_IN_MATCH', 'TRIGGERED', 'UNKNOWN')",
+            name="ck_exchange_order_status_valid",
+        ),
+        Index("ix_exchange_order_intent_id", "intent_id"),
+    )
+
+    order_row_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    intent_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("trade_intent.intent_id", ondelete="CASCADE"), nullable=False
+    )
+    purpose: Mapped[str] = mapped_column(String(20), nullable=False)
+    client_order_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    exchange_order_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    symbol: Mapped[str] = mapped_column(String(30), nullable=False)
+    side: Mapped[str] = mapped_column(String(10), nullable=False)
+    order_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    position_side: Mapped[str] = mapped_column(String(10), nullable=False, server_default="BOTH")
+    reduce_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    close_position: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    working_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    requested_quantity: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    requested_price: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    requested_stop_price: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    filled_quantity: Mapped[Decimal] = mapped_column(
+        Numeric(20, 8), nullable=False, server_default="0"
+    )
+    avg_fill_price: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    raw_response: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class ProtectionOrder(Base):
+    """Tracks one `TradeIntent`'s stop-loss coverage (FR-019, Phase 6 Slice 2a).
+
+    One row per `intent_id` in this slice -- CS-BN-005 (dynamic resizing on
+    additional partial fills) is out of scope, see
+    docs/phase-6/known-issues.md. `confirmation_deadline` is
+    `fill_confirmed_at + 5s`.
+
+    `state='EMERGENCY_CLOSED'` is a valid CHECK value but is not written
+    automatically as of 2026-09-29: per the user's explicit instruction, a
+    `state='FAILED'` protection order no longer triggers an automatic
+    Emergency Close -- it only produces an outbox/audit notification, and
+    the position is left open, unprotected, for the user to handle
+    themselves (they set stops manually). `EMERGENCY_CLOSED` remains a
+    schema-valid value for a possible future manual "close" command
+    (FR-021), not something this module reaches on its own.
+    """
+
+    __tablename__ = "protection_order"
+    __table_args__ = (
+        UniqueConstraint("intent_id", name="uq_protection_order_intent"),
+        CheckConstraint(
+            "state IN ('PENDING', 'CONFIRMED', 'FAILED', 'EMERGENCY_CLOSED')",
+            name="ck_protection_order_state_valid",
+        ),
+        CheckConstraint("protected_quantity > 0", name="ck_protection_order_quantity_positive"),
+    )
+
+    protection_row_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    intent_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("trade_intent.intent_id", ondelete="CASCADE"), nullable=False
+    )
+    exchange_order_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("exchange_order.order_row_id"), nullable=True
+    )
+    protected_quantity: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    stop_price: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    state: Mapped[str] = mapped_column(String(20), nullable=False)
+    confirmation_deadline: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class TakeProfitOrder(Base):
+    """Tracks one `TradeIntent`'s take-profit order (Phase 6 Slice 2a, added 2026-09-29
+
+    per explicit user request). One row per `intent_id` -- only the first
+    value of `trade_intent.take_profits` is ever used; multiple take-profit
+    levels (splitting quantity across them) is out of scope, same
+    single-level-only judgment call as `ProtectionOrder`. Unlike
+    `ProtectionOrder`, there is no FR-019-style hard deadline: a failed or
+    unconfirmed take-profit placement is notified, not retried or
+    escalated -- missing a take-profit target is a missed-profit risk,
+    not a safety risk the way an unprotected stop is.
+    """
+
+    __tablename__ = "take_profit_order"
+    __table_args__ = (
+        UniqueConstraint("intent_id", name="uq_take_profit_order_intent"),
+        CheckConstraint(
+            "state IN ('PENDING', 'CONFIRMED', 'FAILED')",
+            name="ck_take_profit_order_state_valid",
+        ),
+        CheckConstraint("target_quantity > 0", name="ck_take_profit_order_quantity_positive"),
+    )
+
+    take_profit_row_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    intent_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("trade_intent.intent_id", ondelete="CASCADE"), nullable=False
+    )
+    exchange_order_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("exchange_order.order_row_id"), nullable=True
+    )
+    target_quantity: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    target_price: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    state: Mapped[str] = mapped_column(String(20), nullable=False)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class Fill(Base):
+    """One immutable real trade/execution against an `ExchangeOrder` (FR-020's
+
+    eventual reconciliation input, and Slice 2a's own fill-quantity source
+    of truth). Never updated -- a correction, if one is ever needed, is a
+    new row, same as every other audit-shaped table in this file.
+    """
+
+    __tablename__ = "fill"
+    __table_args__ = (
+        UniqueConstraint("order_row_id", "exchange_trade_id", name="uq_fill_order_trade"),
+        CheckConstraint("quantity > 0", name="ck_fill_quantity_positive"),
+        CheckConstraint("price > 0", name="ck_fill_price_positive"),
+    )
+
+    fill_row_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    order_row_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("exchange_order.order_row_id", ondelete="CASCADE"), nullable=False
+    )
+    exchange_trade_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    price: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    commission: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False, server_default="0")
+    commission_asset: Mapped[str] = mapped_column(String(10), nullable=False)
+    realized_pnl: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    filled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class PositionSnapshot(Base):
+    """One point-in-time real Binance account/position observation (BR-007/010,
+
+    Phase 6 Slice 2a). Append-only time series, matching this entity's own
+    one-line description in logical-data-model.md's Entity Overview.
+    `triggered_by_intent_id` is nullable: a snapshot is always taken as
+    part of evaluating one intent's execution preflight, but is itself a
+    general-purpose fact about the account, not owned by that intent.
+    """
+
+    __tablename__ = "position_snapshot"
+    __table_args__ = (
+        CheckConstraint("environment = 'TESTNET'", name="ck_position_snapshot_environment_testnet"),
+        CheckConstraint("position_side = 'BOTH'", name="ck_position_snapshot_position_side_valid"),
+        CheckConstraint(
+            "margin_type IS NULL OR margin_type IN ('ISOLATED', 'CROSS')",
+            name="ck_position_snapshot_margin_type_valid",
+        ),
+        Index("ix_position_snapshot_symbol_fetched_at", "symbol", "fetched_at"),
+    )
+
+    snapshot_row_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    environment: Mapped[str] = mapped_column(String(10), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(30), nullable=False)
+    position_side: Mapped[str] = mapped_column(String(10), nullable=False, server_default="BOTH")
+    position_amount: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    entry_price: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    mark_price: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    unrealized_pnl: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    initial_margin: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    maint_margin: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    leverage: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    margin_type: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    liquidation_price: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    triggered_by_intent_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("trade_intent.intent_id"), nullable=True
+    )
+    raw_response: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

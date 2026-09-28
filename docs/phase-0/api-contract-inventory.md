@@ -79,6 +79,58 @@ Authoritative entry points:
 | CS-BN-004 | Position ROE-to-stop formula with fees/funding/maintenance/slippage? | Golden cases reconciled to Testnet position/account data | 6 |
 | CS-BN-005 | Partial fill protection sequencing? | Testnet partial fill and protection/emergency scenarios | 6 |
 
+### CS-BN-001 — Resolved 2026-09-25
+
+Captured via `scripts/binance_testnet_spike.py` (read-only signed `GET`, no order placed) against a real Testnet account:
+
+- `GET /fapi/v2/account` and `GET /fapi/v2/positionRisk` both return `positionSide: "BOTH"` on every entry (not `LONG`/`SHORT`) — **confirms the account is in One-way mode**, not Hedge mode. This is a precondition CS-BN-002 needed and is now known, not assumed.
+- `account.positions[]` and `positionRisk[]` list all ~740 listed symbols regardless of whether a position is open (flat entries have `positionAmt: "0"`); a real position adapter must filter, not assume the response is pre-filtered to open positions only.
+- Field shapes match current official docs field-for-field (`initialMargin`, `maintMargin`, `entryPrice`, `breakEvenPrice`, `leverage`, `isolated`, `notional`, `liquidationPrice`, `marginType`, `adlQuantile`, etc.) — no undocumented or renamed fields found on Testnet at time of spike.
+
+### CS-BN-002 — Closed 2026-09-28 (corrects the 2026-09-25 "substantially resolved" note below)
+
+**The 2026-09-25 conclusion was wrong, and was corrected by an actual placement attempt, not another read-only observation.** Building Slice 2a's `execution_gateway.py`, the very first real attempt to place a `STOP_MARKET` protection order via `POST /fapi/v1/order` (the plain order endpoint) was rejected outright:
+
+```
+HTTP 400 code=-4120: Order type not supported for this endpoint. Please use the Algo Order API endpoints instead.
+```
+
+`POST /fapi/v1/algoOrder` (`algoType=CONDITIONAL`) — this project's *original* Phase 0 hypothesis, which the 2026-09-25 note below overturned based only on a `GET /fapi/v1/openOrders` observation of an already-placed order — is in fact the only way to place a new `STOP_MARKET`/`TAKE_PROFIT_MARKET` order on USDⓈ-M Futures. The lesson: observing an existing order's *shape* via a read-only query is not the same as exercising the *placement* contract; the read-only spike never actually called the endpoint it was drawing conclusions about. Query is via a **separate** endpoint too: `GET /fapi/v1/algoOrder` (by `algoId` or `clientAlgoId`) — a placed algo order does **not** appear in `GET /fapi/v1/openOrders` at all (confirmed live: a real `STOP_MARKET` algo order with `algoStatus: "NEW"` was invisible to `openOrders`, only visible via `GET /fapi/v1/algoOrder`). `execution_gateway.py`'s `_place_and_confirm_protection` uses `place_algo_order`/`get_algo_order` (see `binance_trading_client.py`) accordingly. Confirmed field semantics unchanged from the earlier note: `workingType: "CONTRACT_PRICE"`, `closePosition: false` with explicit `reduceOnly`+`quantity`, `positionSide: "BOTH"`.
+
+Also confirmed live: `newClientOrderId`'s idempotency (FR-018) only holds while an order is *active* -- once a `MARKET` entry order fills (closing it), Binance allows reusing that same `clientOrderId` for a genuinely new order rather than rejecting/deduplicating it. A retried script run within that fill window can therefore double-submit a real entry. Slice 2a has no defense against this yet beyond "don't manually re-run the script against an intent that already has a lifecycle row" (which `load_eligible_intents` already enforces for *separate* runs) -- the actual gap is a *retry within the same run* racing a fill, which is exactly what happened once during this session's own testing (caught and manually closed out, no code fix yet). Tracked in known-issues.md.
+
+<details>
+<summary>Original 2026-09-25 note (superseded above, kept for the record)</summary>
+
+A real BTCUSDT entry placed through Binance's own web UI (0.0693 BTC, 20x, cross) auto-attached an OTOCO stop-loss/take-profit bracket. `GET /fapi/v1/openOrders` (via the spike script) shows both legs as ordinary order objects returned by the standard order-query surface, not a separate algo-order listing:
+
+```json
+{ "type": "TAKE_PROFIT_MARKET", "stopPrice": "84800", "reduceOnly": true, "closePosition": false,
+  "workingType": "CONTRACT_PRICE", "positionSide": "BOTH", "strategyType": "OTOCO" }
+{ "type": "STOP_MARKET", "stopPrice": "82900", "reduceOnly": true, "closePosition": false,
+  "workingType": "CONTRACT_PRICE", "positionSide": "BOTH", "strategyType": "OTOCO" }
+```
+
+This was read as overturning the original `algoOrder` guess. It didn't: the web UI's OTOCO bracket most likely uses a *different*, unpublished internal mechanism (or the plain endpoint behaves differently for Binance's own first-party client) -- these two legs merely *displaying* alongside regular orders in `openOrders` said nothing about which endpoint a third-party API caller must use to create one, which is the actual CS-BN-002 question.
+
+</details>
+
+**Closed 2026-09-28 — can the web UI's "TP/SL at entry" checkbox be replicated in one API call?** No. Checked official docs (`developers.binance.com`) and the Binance Developer Community forum directly: Binance's `order/list` OTO/OTOCO endpoints exist only for **Spot and Margin** (`Margin Account New OTOCO`, Spot's OTO/OTOCO glossary entries) — there is no USDⓈ-M Futures equivalent. The Futures-side `POST /fapi/v1/algoOrder` (`algoType=CONDITIONAL`) places a standalone conditional order, not one linked to an unfilled entry. The Binance Developer Community's own answer to "How to implement OTOCO(TP/SL) orders using API" ([dev.binance.vision/t/1622](https://dev.binance.vision/t/how-to-implement-otoco-tp-sl-orders-using-api/1622)) states plainly: *"there is no single API endpoint that creates a position with attached TP/SL orders atomically... the web UI's TP/SL checkbox uses Binance's internal OTOCO strategy, but this atomic functionality is not currently exposed through the public REST API."* Confirms: entry-then-verify-fill-then-place-protection (exactly Slice 2a's design, driven by FR-019) is not just the safer choice among options -- for USDⓈ-M Futures, it is the only way to do this through the public API at all.
+
+### CS-BN-005 — Still open
+
+The same entry order filled entirely in one trade (`user_trades[0].qty == origQty`) — no partial fill was observed. Needs a deliberately-undersized-liquidity limit order (or a Testnet scenario known to fragment fills) to actually see partial-fill sequencing.
+
+### CS-BN-004 / TBD-003 — Data gathered 2026-09-25, formula update still pending
+
+Same spike also pulled real Testnet values feeding the ROE-to-stop-price formula:
+
+- `GET /fapi/v1/leverageBracket?symbol=BTCUSDT` → full maintenance-margin-ratio bracket table (e.g. bracket 1: notional 0–50,000 USDT, `maintMarginRatio: 0.004`, `initialLeverage: 125`).
+- `GET /fapi/v1/commissionRate?symbol=BTCUSDT` → `makerCommissionRate: 0.0002`, `takerCommissionRate: 0.0004`.
+- `GET /fapi/v1/premiumIndex?symbol=BTCUSDT` (public) → `lastFundingRate: 0.0001`, 8h funding interval.
+
+Maintenance margin and fee/funding rate are now real numbers, not assumed. Slippage buffer is a policy choice, not a value the API returns — still needs a decision the same way `RISK_MAX_PRICE_DEVIATION_BPS` was. `risk_engine.compute_roe_stop_price` has not been updated yet; this spike only gathered the inputs the refined formula will need.
+
 ## 6. Contract Drift Policy
 
 - Store adapter contract version and official-doc snapshot date in Phase reports.

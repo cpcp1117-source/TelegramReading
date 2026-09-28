@@ -85,9 +85,7 @@ def risk_config_from_settings(settings: Settings) -> RiskConfig:
     return RiskConfig(
         leverage=settings.risk_leverage,
         default_stop_roe_pct=settings.risk_default_stop_roe_pct,
-        max_single_trade_risk_pct=settings.risk_max_single_trade_risk_pct,
-        max_single_trade_initial_margin_pct=settings.risk_max_single_trade_initial_margin_pct,
-        max_total_initial_margin_pct=settings.risk_max_total_initial_margin_pct,
+        position_size_pct=settings.risk_position_size_pct,
         max_concurrent_positions=settings.risk_max_concurrent_positions,
         daily_loss_kill_switch_pct=settings.risk_daily_loss_kill_switch_pct,
         max_receive_lag_seconds=settings.risk_max_receive_lag_seconds,
@@ -119,9 +117,7 @@ def get_or_create_risk_config_snapshot(
     values = (
         config.leverage,
         config.default_stop_roe_pct,
-        config.max_single_trade_risk_pct,
-        config.max_single_trade_initial_margin_pct,
-        config.max_total_initial_margin_pct,
+        config.position_size_pct,
         config.max_concurrent_positions,
         config.daily_loss_kill_switch_pct,
         config.max_receive_lag_seconds,
@@ -138,9 +134,7 @@ def get_or_create_risk_config_snapshot(
             config_snapshot_id=snapshot_id,
             leverage=config.leverage,
             default_stop_roe_pct=config.default_stop_roe_pct,
-            max_single_trade_risk_pct=config.max_single_trade_risk_pct,
-            max_single_trade_initial_margin_pct=config.max_single_trade_initial_margin_pct,
-            max_total_initial_margin_pct=config.max_total_initial_margin_pct,
+            position_size_pct=config.position_size_pct,
             max_concurrent_positions=config.max_concurrent_positions,
             daily_loss_kill_switch_pct=config.daily_loss_kill_switch_pct,
             max_receive_lag_seconds=config.max_receive_lag_seconds,
@@ -285,6 +279,77 @@ def _apply_approved_intent_to_account(
         open_position_count=account.open_position_count + 1,
         open_position_sides={**account.open_position_sides, intent.symbol: intent.side},
         total_initial_margin_used_usdt=account.total_initial_margin_used_usdt + margin_used,
+    )
+
+
+def preview_trade_intent(
+    signal: NormalizedSignal,
+    raw_message: TelegramMessageVersion,
+    *,
+    config: RiskConfig,
+    market_data_client: Any,
+    now: datetime,
+) -> RiskEvaluation:
+    """Read-only preview for the Control Bot's pre-approval notification.
+
+    Computes exactly what `run_risk_evaluation` would compute for this
+    signal if it were approved right now, using a clean-slate `AccountState`
+    (same Slice-1 limitation as `run_risk_evaluation` itself -- see this
+    module's docstring). Writes nothing to the database: this is shown to
+    the user *before* they decide, not a recorded `RiskDecision`. The
+    authoritative evaluation still runs post-approval via
+    `run_risk_evaluation`, against whatever the market/account looks like
+    at that later moment -- this preview can and will go stale between
+    notification and approval, same as the signal's own price-deviation
+    check already tolerates.
+    """
+    if (
+        signal.symbol is None
+        or signal.side is None
+        or signal.entry_type is None
+        or (signal.status != "VALIDATED")
+    ):
+        return RiskEvaluation(verdict="REJECTED", reason_codes=[REASON_SIGNAL_NOT_VALIDATED])
+
+    try:
+        market_price: Decimal | None = fetch_mark_price(
+            market_data_client, signal.symbol, clock=lambda: now
+        ).price
+    except Exception:
+        LOGGER.warning(
+            "preview could not fetch mark price; showing no quantity preview",
+            extra={"context": {"symbol": signal.symbol, "signal_row_id": signal.signal_row_id}},
+        )
+        market_price = None
+
+    reference_price: Decimal | None = None
+    if signal.entry_type == "MARKET" and market_price is not None:
+        try:
+            reference_price = fetch_reference_price(
+                market_data_client, signal.symbol, at=raw_message.source_date
+            )
+        except Exception:
+            LOGGER.warning(
+                "preview could not fetch reference price; BR-006 deviation check skipped",
+                extra={"context": {"symbol": signal.symbol, "signal_row_id": signal.signal_row_id}},
+            )
+
+    intent_input = TradeIntentInput(
+        symbol=signal.symbol,
+        side=signal.side,
+        entry_type=signal.entry_type,
+        entry_values=[Decimal(v) for v in (signal.entry_values or [])],
+        stop_value=signal.stop_value,
+        signal_source_date=raw_message.source_date,
+        signal_received_at=raw_message.received_at,
+    )
+    return evaluate_trade_intent(
+        intent_input,
+        config=config,
+        account=default_starting_account_state(config),
+        market_price=market_price,
+        reference_price=reference_price,
+        now=now,
     )
 
 

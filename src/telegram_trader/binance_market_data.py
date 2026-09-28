@@ -5,7 +5,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 from typing import Any
 
 import httpx
@@ -98,6 +98,61 @@ def parse_active_perpetual_symbols(exchange_info: dict[str, Any]) -> frozenset[s
         ):
             active.add(entry["symbol"])
     return frozenset(active)
+
+
+@dataclass(frozen=True, slots=True)
+class SymbolFilters:
+    """Rounding inputs for one symbol (FR-017, Phase 6 Slice 2a) -- `tick_size`
+
+    from `PRICE_FILTER`, `step_size` from `LOT_SIZE`. Slice 2a deliberately
+    uses `LOT_SIZE` (not the separate, sometimes looser `MARKET_LOT_SIZE`)
+    for both MARKET and LIMIT entries -- rounding to the stricter of the
+    two step sizes is always still a valid quantity for either order type
+    on real Binance configurations, and it avoids needing two separate
+    rounding paths for one symbol.
+    """
+
+    tick_size: Decimal
+    step_size: Decimal
+
+
+def get_symbol_filters(exchange_info: dict[str, Any], symbol: str) -> SymbolFilters:
+    """Raises if `symbol` is missing or lacks `PRICE_FILTER`/`LOT_SIZE` -- fail
+
+    closed (BR-012): never silently fall back to an unrounded price/quantity.
+    """
+    for entry in exchange_info.get("symbols", []):
+        if entry.get("symbol") != symbol:
+            continue
+        tick_size: Decimal | None = None
+        step_size: Decimal | None = None
+        for filt in entry.get("filters", []):
+            if filt.get("filterType") == "PRICE_FILTER":
+                tick_size = Decimal(str(filt["tickSize"]))
+            elif filt.get("filterType") == "LOT_SIZE":
+                step_size = Decimal(str(filt["stepSize"]))
+        if tick_size is None or step_size is None:
+            raise ValueError(f"{symbol!r} exchangeInfo is missing PRICE_FILTER/LOT_SIZE")
+        return SymbolFilters(tick_size=tick_size, step_size=step_size)
+    raise ValueError(f"{symbol!r} not found in exchangeInfo")
+
+
+def _round_to_step(value: Decimal, step: Decimal) -> Decimal:
+    """Truncates down to the nearest multiple of `step` -- matches Binance's own
+
+    step-size truncation convention (never rounds up past a filter limit).
+    """
+    if step == 0:
+        return value
+    return (value / step).to_integral_value(rounding=ROUND_DOWN) * step
+
+
+def round_price(price: Decimal, filters: SymbolFilters) -> Decimal:
+    return _round_to_step(price, filters.tick_size)
+
+
+def round_quantity(quantity: Decimal, filters: SymbolFilters) -> Decimal:
+    return _round_to_step(quantity, filters.step_size)
 
 
 def compute_snapshot_id(fetched_at: datetime, active_symbols: frozenset[str]) -> str:

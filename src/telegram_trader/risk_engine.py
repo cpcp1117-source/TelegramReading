@@ -19,7 +19,18 @@ TBD-003 (system-spec.md): the ROE-to-stop-price formula implemented here
 (`compute_roe_stop_price`) is the baseline leverage-only formula. It does
 not account for fees, funding, maintenance margin, or a slippage buffer --
 those remain genuinely unresolved, not silently assumed away. See
-docs/phase-6/known-issues.md.
+docs/phase-6/known-issues.md. Lower priority since 2026-09-25 (P6-NOTICE-007):
+the user's real signals always carry a structure-based `stop_value`, so this
+formula only ever runs as a fallback for a signal that omits one, not the
+common case.
+
+Sizing/approval policy, 2026-09-25 (P6-NOTICE-007, supersedes P6-LIMIT-005):
+every trade is reviewed by the user before placement, so BR-007 (symbol
+conflict), BR-010 (max concurrent positions), and BR-011 (daily kill switch)
+no longer force a `REJECTED` verdict -- they surface as `advisory_codes`
+instead. Sizing (BR-009) is a flat `equity * position_size_pct` margin at
+`leverage`, not a function of stop distance, since the user's stop comes
+from chart structure, not risk math.
 
 BR-006 freshness, revised (P6-LIMIT-004): a raw elapsed-time check against
 the signal's own post time was found to reject nearly every real signal
@@ -38,7 +49,7 @@ health question, not the human-approval-delay problem this replaces.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 
@@ -60,13 +71,20 @@ REASON_QUANTITY_NOT_POSITIVE = "QUANTITY_NOT_POSITIVE"
 
 @dataclass(frozen=True, slots=True)
 class RiskConfig:
-    """One `risk_config_snapshot` row's values, as a plain dataclass for pure evaluation."""
+    """One `risk_config_snapshot` row's values, as a plain dataclass for pure evaluation.
+
+    `position_size_pct` (P6-LIMIT-005, superseded 2026-09-25): sizing is no
+    longer the minimum of three independently-computed caps. The user's own
+    trading practice sets stop-loss by chart structure (prior swing low/high),
+    not by a risk-derived stop distance, so a risk-based sizing cap tied to
+    stop distance no longer matches how stops are actually chosen. Sizing is
+    now a flat `equity * position_size_pct` margin at `leverage`, full stop.
+    See docs/phase-6/known-issues.md P6-NOTICE-007.
+    """
 
     leverage: int
     default_stop_roe_pct: Decimal
-    max_single_trade_risk_pct: Decimal
-    max_single_trade_initial_margin_pct: Decimal
-    max_total_initial_margin_pct: Decimal
+    position_size_pct: Decimal
     max_concurrent_positions: int
     daily_loss_kill_switch_pct: Decimal
     max_receive_lag_seconds: int
@@ -105,11 +123,23 @@ class TradeIntentInput:
 
 @dataclass(frozen=True, slots=True)
 class RiskEvaluation:
+    """`advisory_codes` (added 2026-09-25, see P6-NOTICE-007): BR-007/010/011
+
+    (symbol conflict, max concurrent positions, daily kill switch) are
+    surfaced here but never block approval or block computing a stop/
+    quantity -- the user reviews every trade before it is placed and wants
+    these as visible flags, not automatic rejections. `reason_codes` is
+    reserved for what still fails closed: missing/stale market data,
+    BR-006 price deviation, receive lag, an invalid stop, or a
+    non-positive computed quantity.
+    """
+
     verdict: Verdict
     reason_codes: list[str]
-    computed_stop_price: Decimal | None
-    quantity: Decimal | None
-    entry_price_used: Decimal | None
+    advisory_codes: list[str] = field(default_factory=list)
+    computed_stop_price: Decimal | None = None
+    quantity: Decimal | None = None
+    entry_price_used: Decimal | None = None
 
 
 def compute_roe_stop_price(
@@ -147,34 +177,18 @@ def _sized_quantity(
     *,
     equity: Decimal,
     entry_price: Decimal,
-    stop_price: Decimal,
     leverage: int,
-    existing_total_margin: Decimal,
     config: RiskConfig,
 ) -> Decimal:
-    """The most conservative of three independent caps (BR-009): risk-based sizing,
+    """Flat sizing (BR-009, superseded 2026-09-25): `equity * position_size_pct`
 
-    single-trade margin cap, and remaining total-margin headroom. `min()`
-    across all three, never a silent average or a reject-only response --
-    "限制" (limit) in FR-016's own wording implies capping, not refusing a
-    trade that a smaller size would make acceptable.
+    as margin, at `leverage`, full stop -- not a function of stop distance.
+    See `RiskConfig.position_size_pct`'s docstring for why the old
+    three-cap-minimum no longer applies.
     """
-    risk_amount = equity * config.max_single_trade_risk_pct
-    stop_distance = abs(entry_price - stop_price)
-    risk_capped_qty = risk_amount / stop_distance if stop_distance > 0 else Decimal(0)
-
-    single_margin_cap_usdt = equity * config.max_single_trade_initial_margin_pct
-    single_margin_capped_qty = (single_margin_cap_usdt * Decimal(leverage)) / entry_price
-
-    total_margin_cap_usdt = equity * config.max_total_initial_margin_pct
-    remaining_margin_usdt = total_margin_cap_usdt - existing_total_margin
-    remaining_margin_capped_qty = (
-        (remaining_margin_usdt * Decimal(leverage)) / entry_price
-        if remaining_margin_usdt > 0
-        else Decimal(0)
-    )
-
-    return min(risk_capped_qty, single_margin_capped_qty, remaining_margin_capped_qty)
+    margin_usdt = equity * config.position_size_pct
+    notional_usdt = margin_usdt * Decimal(leverage)
+    return notional_usdt / entry_price
 
 
 def evaluate_trade_intent(
@@ -196,26 +210,26 @@ def evaluate_trade_intent(
     module docstring's "BR-006 freshness, revised" note); ignored for
     `LIMIT`/`RANGE`, which anchor to the signal's own stated price instead
     of live market conditions.
+
+    BR-007/010/011, superseded 2026-09-25 (see P6-NOTICE-007): symbol
+    conflict, max concurrent positions, and the daily kill switch no longer
+    force a `REJECTED` verdict -- every trade is user-reviewed before
+    placement, so these are surfaced as `advisory_codes` instead, visible
+    but never silently blocking. `reason_codes` still fails closed for
+    market-data/timing/math problems a human reviewing the trade cannot
+    reasonably judge from the notification alone.
     """
     reasons: list[str] = []
+    advisories: list[str] = []
 
     if market_price is None:
         return RiskEvaluation(
             verdict="REJECTED",
             reason_codes=[REASON_STALE_MARKET_DATA],
-            computed_stop_price=None,
-            quantity=None,
-            entry_price_used=None,
         )
 
     if account.daily_realized_loss_pct <= -config.daily_loss_kill_switch_pct:
-        return RiskEvaluation(
-            verdict="REJECTED",
-            reason_codes=[REASON_DAILY_LOSS_KILL_SWITCH],
-            computed_stop_price=None,
-            quantity=None,
-            entry_price_used=None,
-        )
+        advisories.append(REASON_DAILY_LOSS_KILL_SWITCH)
 
     if intent.entry_type == "MARKET":
         if reference_price is None:
@@ -231,10 +245,10 @@ def evaluate_trade_intent(
 
     existing_side = account.open_position_sides.get(intent.symbol)
     if existing_side is not None and existing_side != intent.side:
-        reasons.append(REASON_SYMBOL_CONFLICT)
+        advisories.append(REASON_SYMBOL_CONFLICT)
 
     if account.open_position_count >= config.max_concurrent_positions:
-        reasons.append(REASON_MAX_POSITIONS_REACHED)
+        advisories.append(REASON_MAX_POSITIONS_REACHED)
 
     entry_price = _entry_price_used(intent, market_price)
     stop_price = intent.stop_value
@@ -249,31 +263,26 @@ def evaluate_trade_intent(
         return RiskEvaluation(
             verdict="REJECTED",
             reason_codes=reasons,
-            computed_stop_price=None,
-            quantity=None,
-            entry_price_used=None,
+            advisory_codes=advisories,
         )
 
     quantity = _sized_quantity(
         equity=account.equity_usdt,
         entry_price=entry_price,
-        stop_price=stop_price,
         leverage=config.leverage,
-        existing_total_margin=account.total_initial_margin_used_usdt,
         config=config,
     )
     if quantity <= 0:
         return RiskEvaluation(
             verdict="REJECTED",
             reason_codes=[REASON_QUANTITY_NOT_POSITIVE],
-            computed_stop_price=None,
-            quantity=None,
-            entry_price_used=None,
+            advisory_codes=advisories,
         )
 
     return RiskEvaluation(
         verdict="APPROVED",
         reason_codes=[],
+        advisory_codes=advisories,
         computed_stop_price=stop_price,
         quantity=quantity,
         entry_price_used=entry_price,

@@ -29,6 +29,7 @@ from telegram_trader.channel_policy import (
 )
 from telegram_trader.config import Settings, TelegramChannelTarget, get_settings
 from telegram_trader.db import create_db_engine, create_session_factory, database_is_ready
+from telegram_trader.execution_gateway import _execute_one, load_eligible_intents
 from telegram_trader.mock_telegram import (
     MockMessageProcessor,
     MockTelegramMessage,
@@ -40,6 +41,7 @@ from telegram_trader.models import (
     ChannelPolicy,
     ConsumerCheckpoint,
     MockMessageReceipt,
+    OrderLifecycle,
     OutboxDeliveryReceipt,
     OutboxEvent,
     RiskConfigSnapshot,
@@ -84,6 +86,15 @@ def engine() -> Iterator[Engine]:
     database_url = os.environ.get("TEST_DATABASE_URL")
     integration_settings = Settings(database_url=database_url) if database_url else Settings()
     active_engine = create_db_engine(integration_settings)
+    # The TRUNCATE below CASCADEs into trade_intent/order_lifecycle/exchange_order,
+    # so pointing this suite at the real database erases real execution records.
+    database_name = active_engine.url.database or ""
+    if not database_name.endswith("_test"):
+        active_engine.dispose()
+        pytest.fail(
+            f"refusing to TRUNCATE database {database_name!r}: integration tests "
+            "must target a database whose name ends with '_test'"
+        )
     with active_engine.begin() as connection:
         connection.execute(
             text(
@@ -2560,3 +2571,61 @@ def test_risk_decision_reject_requires_reason_codes(engine: Engine) -> None:
                 "now() + interval '1 hour' FROM trade_intent LIMIT 1"
             )
         )
+
+
+class _TradingClientThatMustNotBeCalled:
+    def __getattr__(self, name: str) -> object:
+        raise AssertionError(f"Binance must not be touched, but {name!r} was called")
+
+
+def test_execute_one_skips_intent_already_claimed_by_concurrent_run(engine: Engine) -> None:
+    """P6-NOTICE-013: two runs can both load the same intent as eligible. Revision 0
+    is the claim -- the run that loses the insert must return before any Binance call,
+    or both submit the entry and a filled MARKET order gets filled a second time."""
+    factory = create_session_factory(engine)
+    _approve_signal(factory, 830)
+    run_risk_evaluation(
+        factory,
+        settings=_risk_settings(),
+        market_data_client=_FakeRiskMarketDataClient(Decimal("100")),
+        clock=lambda: RISK_NOW,
+    )
+    with factory() as session:
+        ((trade_intent, risk_decision),) = load_eligible_intents(session)
+    # The winning run's claim, committed after this run already loaded the intent.
+    with factory.begin() as session:
+        session.add(
+            OrderLifecycle(
+                lifecycle_row_id="concurrent-claim",
+                intent_id=trade_intent.intent_id,
+                revision=0,
+                decision_id=risk_decision.decision_id,
+                environment="TESTNET",
+                symbol=trade_intent.symbol,
+                side=trade_intent.side,
+                entry_client_order_id="en-other-run",
+                state="PENDING_SUBMIT",
+                correlation_id="other-run",
+                transitioned_at=RISK_NOW,
+            )
+        )
+
+    result = _execute_one(
+        factory,
+        trade_intent,
+        risk_decision,
+        settings=_risk_settings(),
+        market_data_client=_TradingClientThatMustNotBeCalled(),
+        trading_client=_TradingClientThatMustNotBeCalled(),
+        clock=lambda: RISK_NOW,
+        poll_timeout_seconds=0,
+        poll_interval_seconds=0,
+        protection_deadline_seconds=0,
+    )
+
+    assert result.final_state == "SKIPPED"
+    with factory() as session:
+        lifecycle_rows = session.scalars(
+            select(OrderLifecycle).where(OrderLifecycle.intent_id == trade_intent.intent_id)
+        ).all()
+    assert [row.lifecycle_row_id for row in lifecycle_rows] == ["concurrent-claim"]

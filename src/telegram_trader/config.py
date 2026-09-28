@@ -9,7 +9,7 @@ from pydantic import AliasChoices, BaseModel, Field, SecretStr, field_validator,
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import URL, make_url
 
-RuntimeEnvironment = Literal["offline", "telegram_readonly", "control_bot"]
+RuntimeEnvironment = Literal["offline", "telegram_readonly", "control_bot", "execution_gateway"]
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
 
@@ -117,6 +117,30 @@ class Settings(BaseSettings):
             "BINANCE_SNAPSHOT_MAX_AGE_SECONDS", "APP_BINANCE_SNAPSHOT_MAX_AGE_SECONDS"
         ),
     )
+    # Phase 6 Slice 2a -- Execution Gateway only. Per credential-handoff.md §5, this
+    # key is scoped to the execution_gateway environment; other services never get
+    # a real value even though the field exists on this shared Settings class (they
+    # simply never receive it via Compose env passthrough).
+    binance_testnet_api_key: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("BINANCE_TESTNET_API_KEY", "APP_BINANCE_TESTNET_API_KEY"),
+    )
+    binance_testnet_api_secret: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "BINANCE_TESTNET_API_SECRET", "APP_BINANCE_TESTNET_API_SECRET"
+        ),
+    )
+    binance_testnet_base_url: str = Field(
+        default="https://demo-fapi.binance.com",
+        validation_alias=AliasChoices("BINANCE_TESTNET_BASE_URL", "APP_BINANCE_TESTNET_BASE_URL"),
+    )
+    # Hardcoded to the only value that may exist before Gate 7/8 -- there is no
+    # Production key yet, so Production is not even a selectable value (TM-012).
+    execution_environment: Literal["TESTNET"] = Field(
+        default="TESTNET",
+        validation_alias=AliasChoices("EXECUTION_ENVIRONMENT", "APP_EXECUTION_ENVIRONMENT"),
+    )
     openai_api_key: SecretStr | None = Field(
         default=None,
         validation_alias=AliasChoices("OPENAI_API_KEY", "APP_OPENAI_API_KEY"),
@@ -155,27 +179,10 @@ class Settings(BaseSettings):
         gt=0,
         validation_alias=AliasChoices("RISK_DEFAULT_STOP_ROE_PCT", "APP_RISK_DEFAULT_STOP_ROE_PCT"),
     )
-    risk_max_single_trade_risk_pct: Decimal = Field(
-        default=Decimal("0.03"),
+    risk_position_size_pct: Decimal = Field(
+        default=Decimal("0.20"),
         gt=0,
-        validation_alias=AliasChoices(
-            "RISK_MAX_SINGLE_TRADE_RISK_PCT", "APP_RISK_MAX_SINGLE_TRADE_RISK_PCT"
-        ),
-    )
-    risk_max_single_trade_initial_margin_pct: Decimal = Field(
-        default=Decimal("0.10"),
-        gt=0,
-        validation_alias=AliasChoices(
-            "RISK_MAX_SINGLE_TRADE_INITIAL_MARGIN_PCT",
-            "APP_RISK_MAX_SINGLE_TRADE_INITIAL_MARGIN_PCT",
-        ),
-    )
-    risk_max_total_initial_margin_pct: Decimal = Field(
-        default=Decimal("0.30"),
-        gt=0,
-        validation_alias=AliasChoices(
-            "RISK_MAX_TOTAL_INITIAL_MARGIN_PCT", "APP_RISK_MAX_TOTAL_INITIAL_MARGIN_PCT"
-        ),
+        validation_alias=AliasChoices("RISK_POSITION_SIZE_PCT", "APP_RISK_POSITION_SIZE_PCT"),
     )
     risk_max_concurrent_positions: int = Field(
         default=3,
@@ -285,7 +292,13 @@ class Settings(BaseSettings):
             raise ValueError("database password cannot be blank")
         return value
 
-    @field_validator("telegram_api_hash", "control_bot_token", "openai_api_key")
+    @field_validator(
+        "telegram_api_hash",
+        "control_bot_token",
+        "openai_api_key",
+        "binance_testnet_api_key",
+        "binance_testnet_api_secret",
+    )
     @classmethod
     def blank_optional_secret_to_none(cls, value: SecretStr | None) -> SecretStr | None:
         """A present-but-blank secret (e.g. an unset `.env` key passed through
@@ -346,6 +359,13 @@ class Settings(BaseSettings):
         ):
             raise ValueError(
                 "CONTROL_BOT_TOKEN and CONTROL_BOT_ALLOWLISTED_USER_ID are required for control_bot"
+            )
+        if self.environment == "execution_gateway" and (
+            self.binance_testnet_api_key is None or self.binance_testnet_api_secret is None
+        ):
+            raise ValueError(
+                "BINANCE_TESTNET_API_KEY and BINANCE_TESTNET_API_SECRET are required "
+                "for execution_gateway"
             )
         return self
 

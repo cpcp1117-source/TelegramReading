@@ -3,9 +3,30 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from telegram_trader.models import OutboxDeliveryReceipt, OutboxEvent
+
+
+def load_pending_events(
+    session: Session, *, consumer_name: str, event_type_prefix: str | None = None
+) -> list[OutboxEvent]:
+    """Every `OutboxEvent` this `consumer_name` has not yet acknowledged, oldest first.
+
+    A generic, per-consumer "at least once" read -- the same event can be
+    read by multiple distinct consumers independently (each has its own
+    delivery-receipt row), and re-reading before acknowledging is always
+    safe (idempotent by design, matching `OutboxConsumer.acknowledge`).
+    """
+    already_delivered = select(OutboxDeliveryReceipt.event_id).where(
+        OutboxDeliveryReceipt.consumer_name == consumer_name
+    )
+    stmt = select(OutboxEvent).where(OutboxEvent.event_id.not_in(already_delivered))
+    if event_type_prefix is not None:
+        stmt = stmt.where(OutboxEvent.event_type.startswith(event_type_prefix))
+    stmt = stmt.order_by(OutboxEvent.recorded_at)
+    return list(session.scalars(stmt))
 
 
 def append_outbox_event(

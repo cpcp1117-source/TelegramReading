@@ -13,10 +13,13 @@ from typing import Any, cast
 from sqlalchemy.orm import Session, sessionmaker
 from telethon import Button, TelegramClient, events  # type: ignore[import-untyped]
 
+from telegram_trader.binance_market_data import create_market_data_client
 from telegram_trader.config import Settings, get_settings
 from telegram_trader.db import create_db_engine, create_session_factory
 from telegram_trader.logging_config import configure_logging
-from telegram_trader.models import NormalizedSignal, SignalDecisionRequest
+from telegram_trader.models import NormalizedSignal, OutboxEvent, SignalDecisionRequest
+from telegram_trader.outbox import OutboxConsumer, load_pending_events
+from telegram_trader.risk_engine import RiskConfig, RiskEvaluation
 from telegram_trader.signal_decisions import (
     DecisionAction,
     DecisionOutcome,
@@ -27,13 +30,16 @@ from telegram_trader.signal_decisions import (
     find_request_by_nonce,
     load_current_draft,
     load_pending_signals,
+    load_pending_signals_with_source,
     record_decision,
 )
 from telegram_trader.telegram_collector import reconnect_delay
 from telegram_trader.telegram_readonly import prepare_session_path
+from telegram_trader.trade_intent_pipeline import preview_trade_intent, risk_config_from_settings
 
 LOGGER = logging.getLogger(__name__)
 
+_EXECUTION_OUTBOX_CONSUMER_NAME = "control_bot"
 _CALLBACK_SEP = ":"
 _CALLBACK_PREFIX_SIGNAL = "signal"
 _CALLBACK_PREFIX_CLOSE_ALL = "close_all"
@@ -142,12 +148,47 @@ def _format_decimal(value: Decimal) -> str:
     return text or "0"
 
 
+def _format_preview(preview: RiskEvaluation, *, leverage: int) -> str:
+    """Renders `preview_trade_intent`'s result -- read-only, informational only.
+
+    Sizing (`quantity`/margin) is independent of stop distance since the
+    2026-09-25 flat-sizing change (see risk_engine.py's `RiskConfig.position_size_pct`
+    docstring), so this never changes when the user edits stop/take-profit
+    afterward -- no re-preview is needed on an edit.
+    """
+    quantity = preview.quantity
+    entry_price_used = preview.entry_price_used
+    if preview.verdict != "APPROVED" or quantity is None or entry_price_used is None:
+        reasons = "、".join(preview.reason_codes) or "未知原因"
+        return f"⚠️ 目前無法預覽下單數量（{reasons}），核准後系統仍會重新計算一次。"
+    notional_usdt = quantity * entry_price_used
+    margin_usdt = notional_usdt / Decimal(leverage)
+    lines = [
+        f"預覽進場價: {_format_decimal(entry_price_used)}",
+        f"預覽數量: {_format_decimal(quantity)}",
+        f"預覽保證金: {_format_decimal(margin_usdt)} USDT"
+        f"（名義本金: {_format_decimal(notional_usdt)} USDT, {leverage}x）",
+    ]
+    if preview.computed_stop_price is not None:
+        lines.append(f"預覽停損價: {_format_decimal(preview.computed_stop_price)}")
+    if preview.advisory_codes:
+        lines.append("⚠️ 提醒（不會擋單）: " + "、".join(preview.advisory_codes))
+    return "\n".join(lines)
+
+
 def format_signal_notification(
-    signal: NormalizedSignal, *, draft: DraftValues | None = None
+    signal: NormalizedSignal,
+    *,
+    draft: DraftValues | None = None,
+    preview: RiskEvaluation | None = None,
+    leverage: int | None = None,
 ) -> str:
     """`draft` is only ever passed after an edit -- the initial notification
 
-    always shows the parser's own unedited values.
+    always shows the parser's own unedited values. `preview`/`leverage` are
+    the pre-approval sizing preview (`trade_intent_pipeline.preview_trade_intent`)
+    -- omitted entirely (not just blank) when the caller has none to show,
+    e.g. a signal whose channel/status never produces one.
     """
     stop_value = draft.stop_value if draft is not None else signal.stop_value
     take_profits = (
@@ -168,12 +209,46 @@ def format_signal_notification(
         ),
         f"stop_origin: {signal.stop_origin}",
     ]
+    if preview is not None and leverage is not None:
+        lines.append(_format_preview(preview, leverage=leverage))
     if draft is not None:
         lines.append("✏️ 停損/停利已依你的修改顯示（尚未核准）。")
     if signal.status == "NEW":
         lines.append(
             "⚠️ symbol 尚未經市場資料驗證（動態範圍頻道），此核准僅供記錄，不會有任何自動下單。"
         )
+    return "\n".join(lines)
+
+
+_EXECUTION_EVENT_TITLES: dict[str, str] = {
+    "execution_skipped_expired": "⏰ 訊號已過期，未執行下單",
+    "execution_cancelled": "🚫 下單已取消",
+    "execution_entry_submitted": "📤 進場單已送出",
+    "execution_entry_not_filled": "⚠️ 進場單逾時未成交",
+    "execution_entry_filled": "✅ 進場單已成交",
+    "execution_protection_confirmed": "🛡️ 停損單已掛上",
+    "execution_protection_failed": "❌ 停損單掛單失敗——目前沒有保護，請自行設定停損",
+    "execution_take_profit_confirmed": "🎯 停利單已掛上",
+    "execution_take_profit_failed": "⚠️ 停利單掛單失敗",
+    "execution_unexpected_error": "🔥 執行過程發生未預期錯誤",
+}
+
+
+def format_execution_notification(event: OutboxEvent) -> str:
+    """Renders one Execution Gateway outbox event as a Telegram message
+
+    (added 2026-09-29, explicit user request: every order/protection/take-profit
+    success or failure must be notified). `event.payload` is whatever
+    `execution_gateway._notify` recorded -- rendered generically (key: value
+    per line) rather than one bespoke formatter per event type, so a new
+    event type is readable here without a matching code change.
+    """
+    title = _EXECUTION_EVENT_TITLES.get(event.event_type, f"ℹ️ {event.event_type}")
+    lines = [title, f"intent_id: {event.aggregate_id[:12]}..."]
+    for key, value in event.payload.items():
+        if value is None:
+            continue
+        lines.append(f"{key}: {value}")
     return "\n".join(lines)
 
 
@@ -220,14 +295,34 @@ class ControlBot:
         bot_token: str,
         allowlisted_user_id: int,
         poll_interval_seconds: float = 60.0,
+        execution_poll_interval_seconds: float = 10.0,
         clock: Callable[[], datetime] | None = None,
+        risk_config: RiskConfig | None = None,
+        market_data_client: Any | None = None,
     ) -> None:
+        """`risk_config`/`market_data_client` are optional: when either is `None`
+
+        (e.g. most existing tests, which construct a `ControlBot` without a
+        real Binance client), the pending-signal notification is sent
+        without a sizing preview rather than raising -- the approve/reject
+        flow itself has never depended on this preview existing.
+
+        `execution_poll_interval_seconds` defaults tighter than
+        `poll_interval_seconds` (10s vs 60s): an order/protection/take-profit
+        outcome is time-sensitive in a way a brand-new signal notification
+        is not (added 2026-09-29, "success or failure must always send a
+        message" -- the point is largely defeated if it arrives a minute
+        late).
+        """
         self._client = client
         self._session_factory = session_factory
         self._bot_token = bot_token
         self._allowlisted_user_id = allowlisted_user_id
         self._poll_interval_seconds = poll_interval_seconds
+        self._execution_poll_interval_seconds = execution_poll_interval_seconds
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._risk_config = risk_config
+        self._market_data_client = market_data_client
         self._last_poll_at: datetime | None = None
         self._pending_close_all_nonce: str | None = None
         self._pending_close_all_expires_at: datetime | None = None
@@ -248,12 +343,31 @@ class ControlBot:
         """
         count = 0
         with self._session_factory() as session:
-            pending = load_pending_signals(session, now=self._clock())
-            for signal in pending:
+            pending = load_pending_signals_with_source(session, now=self._clock())
+            for signal, raw_message in pending:
+                preview: RiskEvaluation | None = None
+                if self._risk_config is not None and self._market_data_client is not None:
+                    try:
+                        preview = preview_trade_intent(
+                            signal,
+                            raw_message,
+                            config=self._risk_config,
+                            market_data_client=self._market_data_client,
+                            now=self._clock(),
+                        )
+                    except Exception:
+                        LOGGER.exception(
+                            "signal preview failed unexpectedly; notifying without one",
+                            extra={"context": {"signal_row_id": signal.signal_row_id}},
+                        )
                 nonce = generate_nonce()
                 message = await self._client.send_message(
                     self._allowlisted_user_id,
-                    format_signal_notification(signal),
+                    format_signal_notification(
+                        signal,
+                        preview=preview,
+                        leverage=self._risk_config.leverage if self._risk_config else None,
+                    ),
                     buttons=_signal_decision_buttons(nonce),
                 )
                 create_request(session, signal, nonce=nonce, telegram_message_id=message.id)
@@ -275,6 +389,50 @@ class ControlBot:
                 delay = reconnect_delay(attempt)
                 LOGGER.exception(
                     "control bot signal poll failed unexpectedly; retrying",
+                    extra={"context": {"retry_seconds": delay}},
+                )
+                attempt += 1
+                await asyncio.sleep(delay)
+
+    async def notify_execution_events(self) -> int:
+        """Forwards every not-yet-delivered Execution Gateway outbox event as a
+
+        Telegram message (added 2026-09-29, explicit user request). Execution
+        Gateway itself never touches Telegram -- the `outbox_events` table
+        (Phase 1 infrastructure, reused here for the first time) is the only
+        thing connecting the two, matching credential-handoff.md's boundary
+        (Testnet key stays Execution-Gateway-only; Telegram stays
+        Control-Bot-only).
+        """
+        count = 0
+        with self._session_factory() as session:
+            pending = load_pending_events(
+                session,
+                consumer_name=_EXECUTION_OUTBOX_CONSUMER_NAME,
+                event_type_prefix="execution_",
+            )
+            for event in pending:
+                await self._client.send_message(
+                    self._allowlisted_user_id, format_execution_notification(event)
+                )
+                consumer = OutboxConsumer(self._session_factory, _EXECUTION_OUTBOX_CONSUMER_NAME)
+                consumer.acknowledge(event.event_id)
+                count += 1
+        return count
+
+    async def _poll_execution_events_forever(self) -> None:
+        attempt = 0
+        while True:
+            await asyncio.sleep(self._execution_poll_interval_seconds)
+            try:
+                await self.notify_execution_events()
+                attempt = 0
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                delay = reconnect_delay(attempt)
+                LOGGER.exception(
+                    "control bot execution-notification poll failed unexpectedly; retrying",
                     extra={"context": {"retry_seconds": delay}},
                 )
                 attempt += 1
@@ -448,6 +606,7 @@ class ControlBot:
 
     async def run_forever(self) -> None:
         poll_task = asyncio.create_task(self._poll_signals_forever())
+        execution_poll_task = asyncio.create_task(self._poll_execution_events_forever())
         try:
             attempt = 0
             while True:
@@ -471,8 +630,11 @@ class ControlBot:
                     await asyncio.sleep(delay)
         finally:
             poll_task.cancel()
+            execution_poll_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await poll_task
+            with contextlib.suppress(asyncio.CancelledError):
+                await execution_poll_task
 
 
 def create_bot_client(
@@ -510,6 +672,16 @@ async def _run() -> int:
     if settings.control_bot_token is None or settings.control_bot_allowlisted_user_id is None:
         raise ValueError("Control Bot credentials are unavailable")
 
+    risk_config: RiskConfig | None = None
+    try:
+        risk_config = risk_config_from_settings(settings)
+    except ValueError:
+        LOGGER.warning(
+            "RISK_EQUITY_BASELINE_USDT is not configured; pending-signal notifications "
+            "will be sent without a sizing preview until it is set"
+        )
+    market_data_client = create_market_data_client(settings) if risk_config is not None else None
+
     client = create_bot_client(settings)
     bot = ControlBot(
         client,
@@ -517,12 +689,16 @@ async def _run() -> int:
         bot_token=settings.control_bot_token.get_secret_value(),
         allowlisted_user_id=settings.control_bot_allowlisted_user_id,
         poll_interval_seconds=settings.control_bot_poll_interval_seconds,
+        risk_config=risk_config,
+        market_data_client=market_data_client,
     )
     try:
         await bot.run_forever()
         return 0
     finally:
         await client.disconnect()
+        if market_data_client is not None:
+            market_data_client.close()
         engine.dispose()
 
 

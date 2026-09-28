@@ -15,6 +15,7 @@ from telegram_trader.models import (
     SignalDecisionEdit,
     SignalDecisionEvent,
     SignalDecisionRequest,
+    TelegramMessageVersion,
 )
 
 DecisionAction = Literal["APPROVE", "REJECT"]
@@ -80,6 +81,49 @@ def load_pending_signals(
         .order_by(NormalizedSignal.created_at)
     )
     return list(session.scalars(stmt))
+
+
+def load_pending_signals_with_source(
+    session: Session, *, now: datetime | None = None
+) -> list[tuple[NormalizedSignal, TelegramMessageVersion]]:
+    """Same rows as `load_pending_signals`, joined to the raw message's
+
+    `source_date`/`received_at` -- needed by `trade_intent_pipeline.preview_trade_intent`
+    for BR-006's receive-lag/price-deviation checks, the same join
+    `trade_intent_pipeline.load_unprocessed_approved_events` already does
+    post-approval. A dedicated function rather than widening
+    `load_pending_signals` itself: `/status` and `/signals` only ever need
+    the bare signal list, not this join.
+    """
+    moment = now if now is not None else datetime.now(UTC)
+    latest_revision = (
+        select(
+            NormalizedSignal.signal_id,
+            func.max(NormalizedSignal.revision).label("max_revision"),
+        )
+        .group_by(NormalizedSignal.signal_id)
+        .subquery()
+    )
+    already_requested = select(SignalDecisionRequest.signal_row_id)
+    stmt = (
+        select(NormalizedSignal, TelegramMessageVersion)
+        .join(
+            latest_revision,
+            (NormalizedSignal.signal_id == latest_revision.c.signal_id)
+            & (NormalizedSignal.revision == latest_revision.c.max_revision),
+        )
+        .join(
+            TelegramMessageVersion,
+            NormalizedSignal.raw_message_id == TelegramMessageVersion.source_event_id,
+        )
+        .where(
+            NormalizedSignal.status.in_(("NEW", "VALIDATED")),
+            NormalizedSignal.signal_row_id.not_in(already_requested),
+            NormalizedSignal.expires_at > moment,
+        )
+        .order_by(NormalizedSignal.created_at)
+    )
+    return list(session.execute(stmt).all())  # type: ignore[arg-type]
 
 
 def create_request(

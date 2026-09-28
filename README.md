@@ -77,6 +77,12 @@ PostgreSQL 只會在第一次建立 volume 時套用 `POSTGRES_PASSWORD`。若�
 
 ### PostgreSQL Integration Tests
 
+`test` service 連線到獨立的 `telegram_trader_test`，不是正式的 `telegram_trader`；整合測試會 `TRUNCATE … CASCADE`，若指向正式資料庫會清掉真實下單紀錄，fixture 也會拒絕名稱不是 `_test` 結尾的資料庫。全新 volume 會由 `docker/postgres-init/` 自動建立測試資料庫；既有 volume 需先手動建立一次：
+
+```powershell
+docker compose exec db createdb -U postgres telegram_trader_test
+```
+
 ```powershell
 docker compose --profile test run --rm test alembic upgrade head
 docker compose --profile test run --rm test pytest --cov --cov-report=term-missing

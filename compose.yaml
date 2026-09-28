@@ -14,6 +14,7 @@ services:
       retries: 20
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
     networks:
       - internal
     restart: unless-stopped
@@ -42,9 +43,7 @@ services:
       THESIS_BATCH_SIZE: ${THESIS_BATCH_SIZE:-25}
       RISK_LEVERAGE: ${RISK_LEVERAGE:-5}
       RISK_DEFAULT_STOP_ROE_PCT: ${RISK_DEFAULT_STOP_ROE_PCT:-0.30}
-      RISK_MAX_SINGLE_TRADE_RISK_PCT: ${RISK_MAX_SINGLE_TRADE_RISK_PCT:-0.03}
-      RISK_MAX_SINGLE_TRADE_INITIAL_MARGIN_PCT: ${RISK_MAX_SINGLE_TRADE_INITIAL_MARGIN_PCT:-0.10}
-      RISK_MAX_TOTAL_INITIAL_MARGIN_PCT: ${RISK_MAX_TOTAL_INITIAL_MARGIN_PCT:-0.30}
+      RISK_POSITION_SIZE_PCT: ${RISK_POSITION_SIZE_PCT:-0.20}
       RISK_MAX_CONCURRENT_POSITIONS: ${RISK_MAX_CONCURRENT_POSITIONS:-3}
       RISK_DAILY_LOSS_KILL_SWITCH_PCT: ${RISK_DAILY_LOSS_KILL_SWITCH_PCT:-0.06}
       RISK_MAX_RECEIVE_LAG_SECONDS: ${RISK_MAX_RECEIVE_LAG_SECONDS:-10}
@@ -82,7 +81,7 @@ services:
       APP_ENVIRONMENT: offline
       APP_DATABASE_HOST: db
       APP_DATABASE_PORT: 5432
-      APP_DATABASE_NAME: telegram_trader
+      APP_DATABASE_NAME: telegram_trader_test
       APP_DATABASE_USER: postgres
       APP_DATABASE_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
     depends_on:
@@ -149,6 +148,15 @@ services:
       CONTROL_BOT_TOKEN: ${CONTROL_BOT_TOKEN:-}
       CONTROL_BOT_ALLOWLISTED_USER_ID: ${CONTROL_BOT_ALLOWLISTED_USER_ID:-}
       CONTROL_BOT_SESSION_PATH: secrets/telegram/control-bot
+      BINANCE_API_BASE_URL: ${BINANCE_API_BASE_URL:-https://fapi.binance.com}
+      RISK_LEVERAGE: ${RISK_LEVERAGE:-5}
+      RISK_DEFAULT_STOP_ROE_PCT: ${RISK_DEFAULT_STOP_ROE_PCT:-0.30}
+      RISK_POSITION_SIZE_PCT: ${RISK_POSITION_SIZE_PCT:-0.20}
+      RISK_MAX_CONCURRENT_POSITIONS: ${RISK_MAX_CONCURRENT_POSITIONS:-3}
+      RISK_DAILY_LOSS_KILL_SWITCH_PCT: ${RISK_DAILY_LOSS_KILL_SWITCH_PCT:-0.06}
+      RISK_MAX_RECEIVE_LAG_SECONDS: ${RISK_MAX_RECEIVE_LAG_SECONDS:-10}
+      RISK_MAX_PRICE_DEVIATION_BPS: ${RISK_MAX_PRICE_DEVIATION_BPS:-50}
+      RISK_EQUITY_BASELINE_USDT: ${RISK_EQUITY_BASELINE_USDT:-}
     depends_on:
       db:
         condition: service_healthy
@@ -165,6 +173,46 @@ services:
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped
+
+  execution-gateway:
+    profiles: ["execution-gateway"]
+    image: telegram-trader-phase6-execution-gateway:${APP_IMAGE_TAG:-phase6}
+    build:
+      context: .
+      target: runtime
+    command: ["python", "scripts/execute_trade_intents.py"]
+    environment:
+      APP_ENVIRONMENT: execution_gateway
+      APP_DATABASE_HOST: db
+      APP_DATABASE_PORT: 5432
+      APP_DATABASE_NAME: telegram_trader
+      APP_DATABASE_USER: postgres
+      APP_DATABASE_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      APP_LOG_LEVEL: INFO
+      APP_SERVICE_NAME: execution-gateway
+      BINANCE_API_BASE_URL: ${BINANCE_API_BASE_URL:-https://fapi.binance.com}
+      BINANCE_TESTNET_API_KEY: ${BINANCE_TESTNET_API_KEY:-}
+      BINANCE_TESTNET_API_SECRET: ${BINANCE_TESTNET_API_SECRET:-}
+      BINANCE_TESTNET_BASE_URL: ${BINANCE_TESTNET_BASE_URL:-https://demo-fapi.binance.com}
+      RISK_LEVERAGE: ${RISK_LEVERAGE:-5}
+      RISK_MAX_CONCURRENT_POSITIONS: ${RISK_MAX_CONCURRENT_POSITIONS:-3}
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - internal
+      - edge
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # Deliberately not unless-stopped: this is a one-shot script, and an
+    # auto-restart mid-order-placement after a crash is a real double-submit
+    # risk this service must never have. A human re-triggers it deliberately.
+    restart: "no"
 
 volumes:
   postgres_data:

@@ -21,12 +21,19 @@ from telegram_trader.control_bot import (
     encode_close_all_callback,
     encode_edit_field_callback,
     encode_signal_callback,
+    format_execution_notification,
     format_signal_notification,
     format_signals_list,
     format_status,
     generate_nonce,
 )
-from telegram_trader.models import NormalizedSignal
+from telegram_trader.models import NormalizedSignal, OutboxEvent
+from telegram_trader.risk_engine import (
+    REASON_MAX_POSITIONS_REACHED,
+    REASON_STALE_MARKET_DATA,
+    REASON_SYMBOL_CONFLICT,
+    RiskEvaluation,
+)
 from telegram_trader.signal_decisions import DraftValues
 
 NOW = datetime(2026, 9, 11, 8, 0, tzinfo=UTC)
@@ -232,6 +239,95 @@ def test_format_signal_notification_shows_draft_values_and_marker() -> None:
     assert "63000" in text
     assert "59000" not in text
     assert "已依你的修改顯示" in text
+
+
+def test_format_signal_notification_omits_preview_block_when_none_given() -> None:
+    text = format_signal_notification(_signal())
+    assert "預覽" not in text
+
+
+def test_format_signal_notification_shows_approved_preview() -> None:
+    preview = RiskEvaluation(
+        verdict="APPROVED",
+        reason_codes=[],
+        computed_stop_price=Decimal("90"),
+        quantity=Decimal("100"),
+        entry_price_used=Decimal("100"),
+    )
+    text = format_signal_notification(_signal(), preview=preview, leverage=5)
+
+    assert "預覽進場價: 100" in text
+    assert "預覽數量: 100" in text
+    # margin = quantity * entry_price / leverage = 100*100/5 = 2000
+    assert "預覽保證金: 2000 USDT" in text
+    assert "5x" in text
+    assert "預覽停損價: 90" in text
+
+
+def test_format_signal_notification_shows_advisory_flags_without_blocking() -> None:
+    preview = RiskEvaluation(
+        verdict="APPROVED",
+        reason_codes=[],
+        advisory_codes=[REASON_SYMBOL_CONFLICT, REASON_MAX_POSITIONS_REACHED],
+        computed_stop_price=Decimal("90"),
+        quantity=Decimal("100"),
+        entry_price_used=Decimal("100"),
+    )
+    text = format_signal_notification(_signal(), preview=preview, leverage=5)
+
+    assert REASON_SYMBOL_CONFLICT in text
+    assert REASON_MAX_POSITIONS_REACHED in text
+    assert "提醒" in text
+
+
+def test_format_signal_notification_shows_unavailable_preview_reason() -> None:
+    preview = RiskEvaluation(verdict="REJECTED", reason_codes=[REASON_STALE_MARKET_DATA])
+    text = format_signal_notification(_signal(), preview=preview, leverage=5)
+
+    assert "無法預覽下單數量" in text
+    assert REASON_STALE_MARKET_DATA in text
+
+
+# --- format_execution_notification (added 2026-09-29, explicit user request) ---
+
+
+def _outbox_event(**overrides: object) -> OutboxEvent:
+    values: dict[str, object] = {
+        "event_id": "event-1",
+        "event_type": "execution_entry_filled",
+        "aggregate_type": "trade_intent",
+        "aggregate_id": "intent-123456789012345678901234567890",
+        "payload": {"symbol": "XRPUSDT", "filled_quantity": "100"},
+    }
+    values.update(overrides)
+    return OutboxEvent(**values)
+
+
+def test_format_execution_notification_known_event_type_has_a_title() -> None:
+    text = format_execution_notification(_outbox_event())
+    assert "✅" in text
+    assert "symbol: XRPUSDT" in text
+    assert "filled_quantity: 100" in text
+
+
+def test_format_execution_notification_protection_failed_warns_no_auto_close() -> None:
+    text = format_execution_notification(
+        _outbox_event(event_type="execution_protection_failed", payload={"symbol": "BTCUSDT"})
+    )
+    assert "沒有保護" in text
+    assert "自行設定停損" in text
+
+
+def test_format_execution_notification_unknown_event_type_falls_back_gracefully() -> None:
+    text = format_execution_notification(_outbox_event(event_type="execution_something_new"))
+    assert "execution_something_new" in text
+
+
+def test_format_execution_notification_skips_none_payload_values() -> None:
+    text = format_execution_notification(
+        _outbox_event(payload={"symbol": "XRPUSDT", "price": None})
+    )
+    assert "price" not in text
 
 
 def test_format_signals_list_empty() -> None:

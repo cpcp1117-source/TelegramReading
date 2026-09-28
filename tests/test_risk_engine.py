@@ -28,9 +28,7 @@ def _config(**overrides: object) -> RiskConfig:
     values: dict[str, object] = {
         "leverage": 5,
         "default_stop_roe_pct": Decimal("0.30"),
-        "max_single_trade_risk_pct": Decimal("0.03"),
-        "max_single_trade_initial_margin_pct": Decimal("0.10"),
-        "max_total_initial_margin_pct": Decimal("0.30"),
+        "position_size_pct": Decimal("0.20"),
         "max_concurrent_positions": 3,
         "daily_loss_kill_switch_pct": Decimal("0.06"),
         "max_receive_lag_seconds": 10,
@@ -164,11 +162,16 @@ def test_evaluate_trade_intent_rejects_when_market_price_missing() -> None:
 # --- BR-011: daily loss kill switch ---
 
 
-def test_evaluate_trade_intent_rejects_when_daily_kill_switch_triggered() -> None:
+def test_evaluate_trade_intent_flags_daily_kill_switch_as_advisory_not_rejected() -> None:
+    """Superseded 2026-09-25 (P6-NOTICE-007): every trade is user-reviewed
+
+    before placement, so this no longer blocks -- it's a visible flag.
+    """
     evaluation = _evaluate(_intent(), account=_account(daily_realized_loss_pct=Decimal("-0.06")))
 
-    assert evaluation.verdict == "REJECTED"
-    assert evaluation.reason_codes == [REASON_DAILY_LOSS_KILL_SWITCH]
+    assert evaluation.verdict == "APPROVED"
+    assert evaluation.reason_codes == []
+    assert REASON_DAILY_LOSS_KILL_SWITCH in evaluation.advisory_codes
 
 
 def test_evaluate_trade_intent_allows_loss_just_under_kill_switch() -> None:
@@ -234,17 +237,18 @@ def test_evaluate_trade_intent_rejects_high_receive_lag() -> None:
     assert REASON_RECEIVE_LAG_TOO_HIGH in evaluation.reason_codes
 
 
-# --- BR-007: symbol conflict ---
+# --- BR-007: symbol conflict (advisory since 2026-09-25, P6-NOTICE-007) ---
 
 
-def test_evaluate_trade_intent_rejects_opposite_side_conflict() -> None:
+def test_evaluate_trade_intent_flags_opposite_side_conflict_as_advisory_not_rejected() -> None:
     evaluation = _evaluate(
         _intent(symbol="BTCUSDT", side="LONG"),
         account=_account(open_position_sides={"BTCUSDT": "SHORT"}, open_position_count=1),
     )
 
-    assert evaluation.verdict == "REJECTED"
-    assert REASON_SYMBOL_CONFLICT in evaluation.reason_codes
+    assert evaluation.verdict == "APPROVED"
+    assert evaluation.reason_codes == []
+    assert REASON_SYMBOL_CONFLICT in evaluation.advisory_codes
 
 
 def test_evaluate_trade_intent_allows_same_side_same_symbol() -> None:
@@ -256,18 +260,19 @@ def test_evaluate_trade_intent_allows_same_side_same_symbol() -> None:
     assert evaluation.verdict == "APPROVED"
 
 
-# --- BR-010: max concurrent positions ---
+# --- BR-010: max concurrent positions (advisory since 2026-09-25, P6-NOTICE-007) ---
 
 
-def test_evaluate_trade_intent_rejects_when_max_positions_reached() -> None:
+def test_evaluate_trade_intent_flags_max_positions_reached_as_advisory_not_rejected() -> None:
     evaluation = _evaluate(
         _intent(symbol="ETHUSDT"),
         config=_config(max_concurrent_positions=3),
         account=_account(open_position_count=3),
     )
 
-    assert evaluation.verdict == "REJECTED"
-    assert REASON_MAX_POSITIONS_REACHED in evaluation.reason_codes
+    assert evaluation.verdict == "APPROVED"
+    assert evaluation.reason_codes == []
+    assert REASON_MAX_POSITIONS_REACHED in evaluation.advisory_codes
 
 
 # --- Stop-side validation ---
@@ -291,46 +296,45 @@ def test_evaluate_trade_intent_rejects_stop_on_wrong_side_for_short() -> None:
     assert REASON_INVALID_STOP in evaluation.reason_codes
 
 
-# --- BR-009: sizing caps ---
+# --- BR-009: flat position-size sizing (superseded 2026-09-25, P6-NOTICE-007) ---
 
 
-def test_evaluate_trade_intent_sizes_to_risk_cap_when_stop_is_far() -> None:
-    # equity=10000, risk_pct=3% => risk_amount=300; stop distance = 100-90=10
-    # risk-capped qty = 300/10 = 30, tighter than the single-margin cap's 50
-    # (1000 margin cap * 5x / 100 price) and the 150 total-margin headroom.
+def test_evaluate_trade_intent_sizes_by_flat_position_size_pct() -> None:
+    # equity=10000, position_size_pct=20% => margin=2000; leverage=5x =>
+    # notional=10000; entry_price=100 (market) => quantity=100.
     evaluation = _evaluate(_intent(side="LONG", stop_value=Decimal("90")))
 
     assert evaluation.verdict == "APPROVED"
-    assert evaluation.quantity == Decimal("30")
+    assert evaluation.quantity == Decimal("100")
 
 
-def test_evaluate_trade_intent_sizing_capped_by_single_trade_margin_when_stop_is_close() -> None:
-    # A close stop makes the risk-based quantity large (300/3=100); the 10%
-    # single-trade margin cap must bind instead: margin_cap_usdt=1000,
-    # qty = 1000*5/100 = 50, tighter than both the risk cap and 150 headroom.
-    evaluation = _evaluate(_intent(side="LONG", stop_value=Decimal("97")))
+def test_evaluate_trade_intent_sizing_is_independent_of_stop_distance() -> None:
+    """The whole point of the 2026-09-25 change: sizing no longer derives
 
-    assert evaluation.verdict == "APPROVED"
+    from stop distance at all -- the user sets stops by chart structure,
+    not by a risk-based distance, so a near stop and a far stop must size
+    identically.
+    """
+    near_stop = _evaluate(_intent(side="LONG", stop_value=Decimal("99")))
+    far_stop = _evaluate(_intent(side="LONG", stop_value=Decimal("50")))
+
+    assert near_stop.quantity == far_stop.quantity == Decimal("100")
+
+
+def test_evaluate_trade_intent_sizing_scales_with_equity() -> None:
+    evaluation = _evaluate(
+        _intent(side="LONG", stop_value=Decimal("90")),
+        account=_account(equity_usdt=Decimal("5000")),
+    )
+
+    # margin=1000, notional=5000, entry_price=100 => quantity=50.
     assert evaluation.quantity == Decimal("50")
 
 
-def test_evaluate_trade_intent_sizing_capped_by_remaining_total_margin() -> None:
-    # Total margin cap is 30% of equity = 3000; 2900 already used elsewhere,
-    # leaving only 100 USDT of margin headroom => qty = 100*5/100 = 5,
-    # far below what risk/single-margin caps alone would allow.
+def test_evaluate_trade_intent_rejects_when_equity_is_zero() -> None:
     evaluation = _evaluate(
-        _intent(side="LONG", stop_value=Decimal("94")),
-        account=_account(total_initial_margin_used_usdt=Decimal("2900")),
-    )
-
-    assert evaluation.verdict == "APPROVED"
-    assert evaluation.quantity == Decimal("5")
-
-
-def test_evaluate_trade_intent_rejects_when_no_margin_headroom_left() -> None:
-    evaluation = _evaluate(
-        _intent(side="LONG", stop_value=Decimal("94")),
-        account=_account(total_initial_margin_used_usdt=Decimal("3000")),
+        _intent(side="LONG", stop_value=Decimal("90")),
+        account=_account(equity_usdt=Decimal("0")),
     )
 
     assert evaluation.verdict == "REJECTED"
@@ -358,6 +362,8 @@ def test_evaluate_trade_intent_collects_multiple_reason_codes() -> None:
     assert set(evaluation.reason_codes) == {
         REASON_PRICE_DEVIATION_TOO_HIGH,
         REASON_RECEIVE_LAG_TOO_HIGH,
+    }
+    assert set(evaluation.advisory_codes) == {
         REASON_SYMBOL_CONFLICT,
         REASON_MAX_POSITIONS_REACHED,
     }
