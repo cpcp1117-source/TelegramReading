@@ -82,6 +82,10 @@ LOGGER = logging.getLogger(__name__)
 
 _ISOLATED_MARGIN_TYPE = "ISOLATED"
 _ORDER_DOES_NOT_EXIST = -2013
+# 2026-09-29, explicit user request: a failed protection/take-profit placement is
+# retried exactly once, started within 5 seconds of the failure.
+_RETRY_DELAY_SECONDS = 1.0
+_RETRY_WINDOW_SECONDS = 5.0
 _PURPOSE_PREFIXES = {
     "ENTRY": "en",
     "PROTECTION": "pr",
@@ -96,6 +100,14 @@ class ExecutionResult:
     symbol: str
     final_state: str
     detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class PlacementAttempt:
+    """One protection/take-profit placement: the accepted algo order, or why it failed."""
+
+    order: dict[str, Any] | None
+    failure_reason: str | None = None
 
 
 def entry_side_for(side: str) -> str:
@@ -124,6 +136,16 @@ def client_order_id_for(intent_id: str, purpose: str) -> str:
     prefix = _PURPOSE_PREFIXES[purpose]
     digest = hashlib.sha256(f"{purpose}:{intent_id}".encode()).hexdigest()[:24]
     return f"{prefix}{digest}"
+
+
+def retry_client_order_id_for(intent_id: str, purpose: str) -> str:
+    """The id for the single retry of a failed algo placement. Distinct from
+    `client_order_id_for`'s (Binance may refuse to reuse a rejected
+    `clientAlgoId`), still deterministic and the same 26-char length.
+    """
+    prefix = _PURPOSE_PREFIXES[purpose]
+    digest = hashlib.sha256(f"{purpose}:retry:{intent_id}".encode()).hexdigest()[:23]
+    return f"{prefix}r{digest}"
 
 
 def _lifecycle_row_id(intent_id: str, revision: int) -> str:
@@ -482,13 +504,13 @@ def _place_and_confirm_protection(
     poll_interval_seconds: float,
     sleep: Callable[[float], None] = time.sleep,
     now_monotonic: Callable[[], float] = time.monotonic,
-) -> dict[str, Any] | None:
+) -> PlacementAttempt:
     """Places the `STOP_MARKET` protection order via the **Algo Order** endpoint
 
     and confirms it was accepted (`algoStatus` not `REJECTED`/`EXPIRED`/
-    `CANCELED`) before FR-019's deadline. Returns the algo-order payload if
-    confirmed, `None` otherwise -- the caller only notifies on `None`
-    (2026-09-29: no longer auto-closes, per explicit user request).
+    `CANCELED`) before FR-019's deadline. One attempt only -- the single
+    retry is `_place_with_one_retry`'s job (2026-09-29: no longer
+    auto-closes, per explicit user request).
 
     Confirmed live 2026-09-28: the plain `/fapi/v1/order` endpoint rejects
     `type=STOP_MARKET` with `-4120`; `POST /fapi/v1/algoOrder`
@@ -507,18 +529,20 @@ def _place_and_confirm_protection(
             triggerPrice=str(stop_price),
             workingType="CONTRACT_PRICE",
         )
-    except Exception:
+    except Exception as error:
         LOGGER.exception("protection order placement failed", extra={"context": {"symbol": symbol}})
-        return None
+        return PlacementAttempt(None, f"placement raised {error!r}")
 
     while now_monotonic() < deadline_monotonic:
         status = str(order.get("algoStatus", ""))
         if status not in _ALGO_TERMINAL_FAILURE_STATUSES:
-            return order
+            return PlacementAttempt(order)
         sleep(poll_interval_seconds)
         order = trading_client.get_algo_order(client_algo_id=client_order_id)
     status = str(order.get("algoStatus", ""))
-    return order if status not in _ALGO_TERMINAL_FAILURE_STATUSES else None
+    if status not in _ALGO_TERMINAL_FAILURE_STATUSES:
+        return PlacementAttempt(order)
+    return PlacementAttempt(None, f"algoStatus={status}")
 
 
 def _place_and_confirm_take_profit(
@@ -529,13 +553,13 @@ def _place_and_confirm_take_profit(
     client_order_id: str,
     quantity: Decimal,
     target_price: Decimal,
-) -> dict[str, Any] | None:
+) -> PlacementAttempt:
     """Places the `TAKE_PROFIT_MARKET` order via the Algo Order endpoint (added
 
     2026-09-29 per explicit user request) and does a single immediate
     accepted/not-accepted check -- unlike protection, there is no FR-019-style
-    hard deadline or retry-polling loop: missing a take-profit target is a
-    missed-profit risk, not a safety risk, so one attempt is enough.
+    hard deadline or status-polling loop. The single retry on failure is
+    `_place_with_one_retry`'s job, same as protection.
     """
     try:
         order: dict[str, Any] = trading_client.place_algo_order(
@@ -548,13 +572,64 @@ def _place_and_confirm_take_profit(
             triggerPrice=str(target_price),
             workingType="CONTRACT_PRICE",
         )
-    except Exception:
+    except Exception as error:
         LOGGER.exception(
             "take-profit order placement failed", extra={"context": {"symbol": symbol}}
         )
-        return None
+        return PlacementAttempt(None, f"placement raised {error!r}")
     status = str(order.get("algoStatus", ""))
-    return order if status not in _ALGO_TERMINAL_FAILURE_STATUSES else None
+    if status not in _ALGO_TERMINAL_FAILURE_STATUSES:
+        return PlacementAttempt(order)
+    return PlacementAttempt(None, f"algoStatus={status}")
+
+
+def _place_with_one_retry(
+    trading_client: Any,
+    place: Callable[[str], PlacementAttempt],
+    *,
+    client_order_id: str,
+    retry_client_order_id: str,
+    on_first_failure: Callable[[str], None],
+    sleep: Callable[[float], None] = time.sleep,
+    now_monotonic: Callable[[], float] = time.monotonic,
+) -> tuple[PlacementAttempt, int, str]:
+    """Runs `place(client_order_id)`; on failure retries exactly once (2026-09-29,
+    explicit user request). Returns `(final attempt, attempt number, client id used)`.
+
+    Before retrying, the first id is looked up: a placement that raised may still
+    have landed server-side, and adopting it avoids stacking a second reduce-only
+    order on the same position. `on_first_failure` (the user's "first attempt
+    failed" notification) fires only once a retry is actually going to be needed.
+    The retry must start within `_RETRY_WINDOW_SECONDS` of the failure, or it is
+    skipped and reported as such rather than placed late.
+    """
+    first = place(client_order_id)
+    if first.order is not None:
+        return first, 1, client_order_id
+    failed_at = now_monotonic()
+    first_reason = first.failure_reason or "unknown"
+
+    try:
+        landed: dict[str, Any] = trading_client.get_algo_order(client_algo_id=client_order_id)
+    except Exception:
+        landed = {}
+    if landed and str(landed.get("algoStatus", "")) not in _ALGO_TERMINAL_FAILURE_STATUSES:
+        LOGGER.warning(
+            "algo placement reported failure but the order exists; adopting it, not retrying",
+            extra={"context": {"client_order_id": client_order_id}},
+        )
+        return PlacementAttempt(landed), 1, client_order_id
+
+    on_first_failure(first_reason)
+    sleep(_RETRY_DELAY_SECONDS)
+    if now_monotonic() - failed_at > _RETRY_WINDOW_SECONDS:
+        reason = f"{first_reason}; retry not started within {_RETRY_WINDOW_SECONDS:g}s"
+        return PlacementAttempt(None, reason), 1, client_order_id
+    second = place(retry_client_order_id)
+    if second.order is None:
+        reason = f"retry: {second.failure_reason or 'unknown'} (first: {first_reason})"
+        second = PlacementAttempt(None, reason)
+    return second, 2, retry_client_order_id
 
 
 def _emergency_close(
@@ -845,7 +920,7 @@ def _execute_one(
         )
 
     # --- Step 7: protection order within FR-019's 5-second deadline ---
-    protection_client_order_id = client_order_id_for(intent_id, "PROTECTION")
+    first_protection_client_order_id = client_order_id_for(intent_id, "PROTECTION")
     protection_row_id = _protection_row_id(intent_id)
     deadline_monotonic = time.monotonic() + protection_deadline_seconds
     with session_factory.begin() as session:
@@ -863,16 +938,47 @@ def _execute_one(
             .on_conflict_do_nothing(index_elements=["intent_id"])
         )
 
-    protection_order = _place_and_confirm_protection(
+    def place_protection(client_order_id: str) -> PlacementAttempt:
+        # First attempt keeps FR-019's deadline from the fill; the retry gets its own.
+        attempt_deadline = (
+            deadline_monotonic
+            if client_order_id == first_protection_client_order_id
+            else time.monotonic() + protection_deadline_seconds
+        )
+        return _place_and_confirm_protection(
+            trading_client,
+            symbol=symbol,
+            side=side,
+            client_order_id=client_order_id,
+            quantity=filled_quantity,
+            stop_price=approved_stop_price,
+            deadline_monotonic=attempt_deadline,
+            poll_interval_seconds=min(poll_interval_seconds, 1.0),
+        )
+
+    def notify_protection_retrying(reason: str) -> None:
+        with session_factory.begin() as session:
+            _notify(
+                session,
+                intent_id=intent_id,
+                event_type="execution_protection_retrying",
+                payload={
+                    "symbol": symbol,
+                    "stop_price": str(approved_stop_price),
+                    "attempt": 1,
+                    "reason": reason,
+                },
+                now=clock(),
+            )
+
+    protection_attempt, protection_attempts, protection_client_order_id = _place_with_one_retry(
         trading_client,
-        symbol=symbol,
-        side=side,
-        client_order_id=protection_client_order_id,
-        quantity=filled_quantity,
-        stop_price=approved_stop_price,
-        deadline_monotonic=deadline_monotonic,
-        poll_interval_seconds=min(poll_interval_seconds, 1.0),
+        place_protection,
+        client_order_id=first_protection_client_order_id,
+        retry_client_order_id=retry_client_order_id_for(intent_id, "PROTECTION"),
+        on_first_failure=notify_protection_retrying,
     )
+    protection_order = protection_attempt.order
 
     if protection_order is not None:
         protection_order_row_id = _order_row_id(protection_client_order_id)
@@ -929,6 +1035,7 @@ def _execute_one(
                     "symbol": symbol,
                     "quantity": str(filled_quantity),
                     "stop_price": str(approved_stop_price),
+                    "attempt": protection_attempts,
                 },
                 now=clock(),
             )
@@ -968,6 +1075,8 @@ def _execute_one(
                     "side": side,
                     "quantity": str(filled_quantity),
                     "stop_price": str(approved_stop_price),
+                    "attempt": protection_attempts,
+                    "reason": protection_attempt.failure_reason,
                 },
                 now=clock(),
             )
@@ -978,15 +1087,42 @@ def _execute_one(
     take_profit_summary = "no take-profit requested"
     if trade_intent.take_profits:
         target_price = round_price(Decimal(str(trade_intent.take_profits[0])), filters)
-        take_profit_client_order_id = client_order_id_for(intent_id, "TAKE_PROFIT")
-        take_profit_order = _place_and_confirm_take_profit(
-            trading_client,
-            symbol=symbol,
-            side=side,
-            client_order_id=take_profit_client_order_id,
-            quantity=filled_quantity,
-            target_price=target_price,
+
+        def place_take_profit(client_order_id: str) -> PlacementAttempt:
+            return _place_and_confirm_take_profit(
+                trading_client,
+                symbol=symbol,
+                side=side,
+                client_order_id=client_order_id,
+                quantity=filled_quantity,
+                target_price=target_price,
+            )
+
+        def notify_take_profit_retrying(reason: str) -> None:
+            with session_factory.begin() as session:
+                _notify(
+                    session,
+                    intent_id=intent_id,
+                    event_type="execution_take_profit_retrying",
+                    payload={
+                        "symbol": symbol,
+                        "target_price": str(target_price),
+                        "attempt": 1,
+                        "reason": reason,
+                    },
+                    now=clock(),
+                )
+
+        take_profit_attempt, take_profit_attempts, take_profit_client_order_id = (
+            _place_with_one_retry(
+                trading_client,
+                place_take_profit,
+                client_order_id=client_order_id_for(intent_id, "TAKE_PROFIT"),
+                retry_client_order_id=retry_client_order_id_for(intent_id, "TAKE_PROFIT"),
+                on_first_failure=notify_take_profit_retrying,
+            )
         )
+        take_profit_order = take_profit_attempt.order
         with session_factory.begin() as session:
             session.execute(
                 pg_insert(TakeProfitOrder)
@@ -1039,6 +1175,8 @@ def _execute_one(
                     "symbol": symbol,
                     "quantity": str(filled_quantity),
                     "target_price": str(target_price),
+                    "attempt": take_profit_attempts,
+                    "reason": take_profit_attempt.failure_reason,
                 },
                 now=clock(),
             )

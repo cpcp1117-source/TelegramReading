@@ -7,15 +7,18 @@ import pytest
 
 from telegram_trader.binance_trading_client import BinanceApiError
 from telegram_trader.execution_gateway import (
+    PlacementAttempt,
     _emergency_close,
     _place_and_confirm_protection,
     _place_and_confirm_take_profit,
     _place_order_idempotent,
+    _place_with_one_retry,
     _poll_for_fill,
     check_advisory_conflicts,
     client_order_id_for,
     close_side_for,
     entry_side_for,
+    retry_client_order_id_for,
 )
 from telegram_trader.risk_engine import REASON_MAX_POSITIONS_REACHED, REASON_SYMBOL_CONFLICT
 
@@ -130,6 +133,7 @@ class _FakeTradingClient:
         self._place_algo_side_effect: Exception | None = None
         self._place_algo_response: dict[str, Any] = {"algoStatus": "NEW", "algoId": 1}
         self._get_algo_order_responses: list[dict[str, Any]] = []
+        self._get_algo_order_errors: list[Exception] = []
 
     def place_order(self, **params: Any) -> dict[str, Any]:
         self.place_calls.append(params)
@@ -155,6 +159,8 @@ class _FakeTradingClient:
 
     def get_algo_order(self, *, client_algo_id: str) -> dict[str, Any]:
         self.get_algo_order_calls.append({"client_algo_id": client_algo_id})
+        if self._get_algo_order_errors:
+            raise self._get_algo_order_errors.pop(0)
         if self._get_algo_order_responses:
             return self._get_algo_order_responses.pop(0)
         return {"algoStatus": "NEW"}
@@ -292,7 +298,7 @@ def test_place_and_confirm_protection_returns_order_when_accepted() -> None:
     client = _FakeTradingClient()
     client._place_algo_response = {"algoStatus": "NEW", "algoId": 2}
 
-    order = _place_and_confirm_protection(
+    attempt = _place_and_confirm_protection(
         client,
         symbol="BTCUSDT",
         side="LONG",
@@ -305,8 +311,8 @@ def test_place_and_confirm_protection_returns_order_when_accepted() -> None:
         now_monotonic=lambda: 0.0,
     )
 
-    assert order is not None
-    assert order["algoId"] == 2
+    assert attempt.order is not None
+    assert attempt.order["algoId"] == 2
     # Placed as a reduceOnly close on the opposite side of the entry.
     assert client.place_algo_calls[0]["side"] == "SELL"
     assert client.place_algo_calls[0]["type"] == "STOP_MARKET"
@@ -319,7 +325,7 @@ def test_place_and_confirm_protection_returns_none_when_placement_raises() -> No
         400, -4120, "Order type not supported for this endpoint"
     )
 
-    order = _place_and_confirm_protection(
+    attempt = _place_and_confirm_protection(
         client,
         symbol="BTCUSDT",
         side="LONG",
@@ -332,7 +338,8 @@ def test_place_and_confirm_protection_returns_none_when_placement_raises() -> No
         now_monotonic=lambda: 0.0,
     )
 
-    assert order is None
+    assert attempt.order is None
+    assert attempt.failure_reason
 
 
 def test_place_and_confirm_protection_returns_none_when_rejected_before_deadline() -> None:
@@ -341,7 +348,7 @@ def test_place_and_confirm_protection_returns_none_when_rejected_before_deadline
     client._get_algo_order_responses = [{"algoStatus": "REJECTED"}]
     times = iter([0.0, 6.0])  # exceeds the 5.0 deadline on the second check, still rejected
 
-    order = _place_and_confirm_protection(
+    attempt = _place_and_confirm_protection(
         client,
         symbol="BTCUSDT",
         side="LONG",
@@ -354,7 +361,8 @@ def test_place_and_confirm_protection_returns_none_when_rejected_before_deadline
         now_monotonic=lambda: next(times),
     )
 
-    assert order is None
+    assert attempt.order is None
+    assert attempt.failure_reason
 
 
 # --- _emergency_close ---
@@ -381,7 +389,7 @@ def test_place_and_confirm_take_profit_returns_order_when_accepted() -> None:
     client = _FakeTradingClient()
     client._place_algo_response = {"algoStatus": "NEW", "algoId": 5}
 
-    order = _place_and_confirm_take_profit(
+    attempt = _place_and_confirm_take_profit(
         client,
         symbol="BTCUSDT",
         side="LONG",
@@ -390,8 +398,8 @@ def test_place_and_confirm_take_profit_returns_order_when_accepted() -> None:
         target_price=Decimal("120"),
     )
 
-    assert order is not None
-    assert order["algoId"] == 5
+    assert attempt.order is not None
+    assert attempt.order["algoId"] == 5
     assert client.place_algo_calls[0]["side"] == "SELL"
     assert client.place_algo_calls[0]["type"] == "TAKE_PROFIT_MARKET"
     assert client.place_algo_calls[0]["reduceOnly"] == "true"
@@ -401,7 +409,7 @@ def test_place_and_confirm_take_profit_returns_none_when_placement_raises() -> N
     client = _FakeTradingClient()
     client._place_algo_side_effect = BinanceApiError(400, -4131, "some rejection")
 
-    order = _place_and_confirm_take_profit(
+    attempt = _place_and_confirm_take_profit(
         client,
         symbol="BTCUSDT",
         side="LONG",
@@ -410,7 +418,8 @@ def test_place_and_confirm_take_profit_returns_none_when_placement_raises() -> N
         target_price=Decimal("120"),
     )
 
-    assert order is None
+    assert attempt.order is None
+    assert attempt.failure_reason
 
 
 def test_place_and_confirm_take_profit_returns_none_when_rejected() -> None:
@@ -421,7 +430,7 @@ def test_place_and_confirm_take_profit_returns_none_when_rejected() -> None:
     client = _FakeTradingClient()
     client._place_algo_response = {"algoStatus": "REJECTED"}
 
-    order = _place_and_confirm_take_profit(
+    attempt = _place_and_confirm_take_profit(
         client,
         symbol="BTCUSDT",
         side="LONG",
@@ -430,4 +439,141 @@ def test_place_and_confirm_take_profit_returns_none_when_rejected() -> None:
         target_price=Decimal("120"),
     )
 
-    assert order is None
+    assert attempt.order is None
+    assert attempt.failure_reason
+
+
+# --- _place_with_one_retry (2026-09-29, explicit user request) ---
+
+
+def test_retry_client_order_id_differs_from_first_and_fits_binance_limit() -> None:
+    first = client_order_id_for("intent-1", "PROTECTION")
+    retry = retry_client_order_id_for("intent-1", "PROTECTION")
+    assert retry != first
+    assert len(retry) == len(first) == 26
+    assert retry == retry_client_order_id_for("intent-1", "PROTECTION")
+
+
+class _ScriptedPlacer:
+    def __init__(self, *attempts: PlacementAttempt) -> None:
+        self._attempts = list(attempts)
+        self.client_order_ids: list[str] = []
+
+    def __call__(self, client_order_id: str) -> PlacementAttempt:
+        self.client_order_ids.append(client_order_id)
+        return self._attempts.pop(0)
+
+
+def test_place_with_one_retry_first_success_places_once_and_skips_retry_notice() -> None:
+    client = _FakeTradingClient()
+    placer = _ScriptedPlacer(PlacementAttempt({"algoStatus": "NEW", "algoId": 1}))
+    first_failures: list[str] = []
+
+    attempt, attempts, used_id = _place_with_one_retry(
+        client,
+        placer,
+        client_order_id="pr1",
+        retry_client_order_id="prr1",
+        on_first_failure=first_failures.append,
+        sleep=lambda _seconds: None,
+    )
+
+    assert attempt.order is not None
+    assert (attempts, used_id) == (1, "pr1")
+    assert placer.client_order_ids == ["pr1"]
+    assert first_failures == []
+
+
+def test_place_with_one_retry_retries_once_with_new_id_and_reports_first_failure() -> None:
+    client = _FakeTradingClient()
+    client._get_algo_order_errors = [BinanceApiError(400, -2013, "Order does not exist.")]
+    placer = _ScriptedPlacer(
+        PlacementAttempt(None, "placement raised timeout"),
+        PlacementAttempt({"algoStatus": "NEW", "algoId": 9}),
+    )
+    first_failures: list[str] = []
+    sleeps: list[float] = []
+
+    attempt, attempts, used_id = _place_with_one_retry(
+        client,
+        placer,
+        client_order_id="pr1",
+        retry_client_order_id="prr1",
+        on_first_failure=first_failures.append,
+        sleep=sleeps.append,
+        now_monotonic=lambda: 0.0,
+    )
+
+    assert attempt.order is not None and attempt.order["algoId"] == 9
+    assert (attempts, used_id) == (2, "prr1")
+    assert placer.client_order_ids == ["pr1", "prr1"]
+    assert first_failures == ["placement raised timeout"]  # notified before retrying
+    assert sleeps == [1.0]
+
+
+def test_place_with_one_retry_reports_both_reasons_when_retry_also_fails() -> None:
+    client = _FakeTradingClient()
+    client._get_algo_order_errors = [BinanceApiError(400, -2013, "Order does not exist.")]
+    placer = _ScriptedPlacer(
+        PlacementAttempt(None, "algoStatus=REJECTED"),
+        PlacementAttempt(None, "algoStatus=EXPIRED"),
+    )
+
+    attempt, attempts, _used_id = _place_with_one_retry(
+        client,
+        placer,
+        client_order_id="pr1",
+        retry_client_order_id="prr1",
+        on_first_failure=lambda _reason: None,
+        sleep=lambda _seconds: None,
+        now_monotonic=lambda: 0.0,
+    )
+
+    assert attempt.order is None
+    assert attempts == 2
+    assert attempt.failure_reason == "retry: algoStatus=EXPIRED (first: algoStatus=REJECTED)"
+
+
+def test_place_with_one_retry_adopts_order_that_landed_despite_reported_failure() -> None:
+    """A placement that raised (e.g. a timeout) may still have been accepted; retrying
+    then would stack a second reduce-only order on the same position."""
+    client = _FakeTradingClient()
+    client._get_algo_order_responses = [{"algoStatus": "NEW", "algoId": 4}]
+    placer = _ScriptedPlacer(PlacementAttempt(None, "placement raised timeout"))
+    first_failures: list[str] = []
+
+    attempt, attempts, used_id = _place_with_one_retry(
+        client,
+        placer,
+        client_order_id="pr1",
+        retry_client_order_id="prr1",
+        on_first_failure=first_failures.append,
+        sleep=lambda _seconds: None,
+    )
+
+    assert attempt.order is not None and attempt.order["algoId"] == 4
+    assert (attempts, used_id) == (1, "pr1")
+    assert placer.client_order_ids == ["pr1"]
+    assert first_failures == []
+
+
+def test_place_with_one_retry_skips_retry_when_5_second_window_has_passed() -> None:
+    client = _FakeTradingClient()
+    client._get_algo_order_errors = [BinanceApiError(400, -2013, "Order does not exist.")]
+    placer = _ScriptedPlacer(PlacementAttempt(None, "algoStatus=REJECTED"))
+    times = iter([0.0, 5.5])  # failure at t=0, retry would start at t=5.5
+
+    attempt, attempts, _used_id = _place_with_one_retry(
+        client,
+        placer,
+        client_order_id="pr1",
+        retry_client_order_id="prr1",
+        on_first_failure=lambda _reason: None,
+        sleep=lambda _seconds: None,
+        now_monotonic=lambda: next(times),
+    )
+
+    assert attempt.order is None
+    assert attempts == 1
+    assert placer.client_order_ids == ["pr1"]
+    assert attempt.failure_reason is not None and "not started within 5s" in attempt.failure_reason

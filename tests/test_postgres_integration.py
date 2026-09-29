@@ -21,6 +21,7 @@ from telegram_trader.binance_market_data import (
     load_latest_snapshot,
     refresh_snapshot,
 )
+from telegram_trader.binance_trading_client import BinanceApiError
 from telegram_trader.channel_policy import (
     ChannelPolicyError,
     evaluate_raw_collection,
@@ -2629,3 +2630,99 @@ def test_execute_one_skips_intent_already_claimed_by_concurrent_run(engine: Engi
             select(OrderLifecycle).where(OrderLifecycle.intent_id == trade_intent.intent_id)
         ).all()
     assert [row.lifecycle_row_id for row in lifecycle_rows] == ["concurrent-claim"]
+
+
+class _FakeExecutionMarketDataClient:
+    def get_exchange_info(self) -> dict[str, object]:
+        return {
+            "symbols": [
+                {
+                    "symbol": "BTCUSDT",
+                    "filters": [
+                        {"filterType": "PRICE_FILTER", "tickSize": "0.1"},
+                        {"filterType": "LOT_SIZE", "stepSize": "0.001"},
+                    ],
+                }
+            ]
+        }
+
+
+class _ProtectionFailsOnceTradingClient:
+    """Entry fills at once; the first STOP_MARKET placement is rejected, the retry lands."""
+
+    def __init__(self) -> None:
+        self.algo_client_ids: list[str] = []
+
+    def get_position_risk(self) -> list[dict[str, object]]:
+        return []
+
+    def set_leverage(self, symbol: str, leverage: int) -> dict[str, object]:
+        return {}
+
+    def set_margin_type(self, symbol: str, margin_type: str) -> dict[str, object]:
+        return {}
+
+    def get_order(self, symbol: str, *, orig_client_order_id: str) -> dict[str, object]:
+        if not hasattr(self, "_entry_placed"):
+            raise BinanceApiError(400, -2013, "Order does not exist.")
+        return {"status": "FILLED", "orderId": 11, "executedQty": "1", "avgPrice": "100"}
+
+    def place_order(self, **params: object) -> dict[str, object]:
+        self._entry_placed = True
+        return {"status": "FILLED", "orderId": 11, "executedQty": "1", "avgPrice": "100"}
+
+    def place_algo_order(self, **params: object) -> dict[str, object]:
+        self.algo_client_ids.append(str(params["clientAlgoId"]))
+        if len(self.algo_client_ids) == 1:
+            raise BinanceApiError(400, -4131, "rejected")
+        return {"algoStatus": "NEW", "algoId": 22}
+
+    def get_algo_order(self, *, client_algo_id: str) -> dict[str, object]:
+        raise BinanceApiError(400, -2013, "Order does not exist.")
+
+
+def test_execute_one_retries_failed_protection_and_notifies_each_attempt(engine: Engine) -> None:
+    """2026-09-29, explicit user request: a failed stop placement is retried once, and
+    both the first failure and the retry's outcome reach the user as notifications."""
+    factory = create_session_factory(engine)
+    _approve_signal(factory, 831)
+    run_risk_evaluation(
+        factory,
+        settings=_risk_settings(),
+        market_data_client=_FakeRiskMarketDataClient(Decimal("100")),
+        clock=lambda: RISK_NOW,
+    )
+    with factory() as session:
+        ((trade_intent, risk_decision),) = load_eligible_intents(session)
+    trading_client = _ProtectionFailsOnceTradingClient()
+
+    result = _execute_one(
+        factory,
+        trade_intent,
+        risk_decision,
+        settings=_risk_settings(),
+        market_data_client=_FakeExecutionMarketDataClient(),
+        trading_client=trading_client,
+        clock=lambda: RISK_NOW,
+        poll_timeout_seconds=0,
+        poll_interval_seconds=0,
+        protection_deadline_seconds=5,
+    )
+
+    assert result.final_state == "PROTECTED"
+    assert len(trading_client.algo_client_ids) == 2
+    assert trading_client.algo_client_ids[0] != trading_client.algo_client_ids[1]
+    with factory() as session:
+        events = session.scalars(
+            select(OutboxEvent)
+            .where(
+                OutboxEvent.aggregate_id == trade_intent.intent_id,
+                OutboxEvent.event_type.like("execution_%"),
+            )
+            .order_by(OutboxEvent.recorded_at, OutboxEvent.event_type)
+        ).all()
+    by_type = {event.event_type: event.payload for event in events}
+    assert by_type["execution_protection_retrying"]["attempt"] == 1
+    assert "rejected" in by_type["execution_protection_retrying"]["reason"]
+    assert by_type["execution_protection_confirmed"]["attempt"] == 2
+    assert "execution_protection_failed" not in by_type
