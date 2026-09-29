@@ -943,7 +943,8 @@ class ExchangeOrder(Base):
             # sentinel for FR-018's "network failure, don't know if it went
             # through" case, never something Binance itself returns.
             "status IN ('NEW', 'PARTIALLY_FILLED', 'FILLED', 'CANCELED', 'PENDING_CANCEL', "
-            "'REJECTED', 'EXPIRED', 'EXPIRED_IN_MATCH', 'TRIGGERED', 'UNKNOWN')",
+            "'REJECTED', 'EXPIRED', 'EXPIRED_IN_MATCH', 'TRIGGERED', 'TRIGGERING', 'FINISHED', "
+            "'UNKNOWN')",
             name="ck_exchange_order_status_valid",
         ),
         Index("ix_exchange_order_intent_id", "intent_id"),

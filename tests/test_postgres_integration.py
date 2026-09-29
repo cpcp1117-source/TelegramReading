@@ -33,6 +33,7 @@ from telegram_trader.config import Settings, TelegramChannelTarget, get_settings
 from telegram_trader.control_bot import ControlBot, encode_handled_callback
 from telegram_trader.db import create_db_engine, create_session_factory, database_is_ready
 from telegram_trader.execution_gateway import _execute_one, load_eligible_intents
+from telegram_trader.execution_worker import StepHealth
 from telegram_trader.mock_telegram import (
     MockMessageProcessor,
     MockTelegramMessage,
@@ -43,6 +44,7 @@ from telegram_trader.models import (
     BinanceSymbolSnapshot,
     ChannelPolicy,
     ConsumerCheckpoint,
+    ExchangeOrder,
     MockMessageReceipt,
     OrderLifecycle,
     OutboxDeliveryReceipt,
@@ -63,6 +65,7 @@ from telegram_trader.normalize_content import NormalizationResult, run_normaliza
 from telegram_trader.openai_client import OpenAiClientError
 from telegram_trader.outbox import OutboxConsumer, append_outbox_event
 from telegram_trader.parse_signals import SignalParsingResult, run_signal_parsing
+from telegram_trader.position_monitor import run_position_monitor
 from telegram_trader.retention_cleanup import run_retention_cleanup
 from telegram_trader.signal_decisions import (
     create_edit,
@@ -2901,3 +2904,180 @@ def test_control_bot_handled_button_rejects_unknown_event(engine: Engine) -> Non
 
     assert press.answers == [("找不到這則通知", True)]
     assert press.edits == []
+
+
+# --- Execution worker / position monitor (2026-09-29, explicit user request) ---
+
+
+class _PositionClosedByStopTradingClient(_ProtectionFailsOnceTradingClient):
+    """After a protected entry: the position is flat, the stop-loss algo triggered,
+    the take-profit algo is still NEW and must be cancelled."""
+
+    def __init__(self, *, flat: bool = True, cancel_error: Exception | None = None) -> None:
+        super().__init__()
+        self._flat = flat
+        self._cancel_error = cancel_error
+        self.cancelled: list[str] = []
+
+    def get_position_risk(self, symbol: str | None = None) -> list[dict[str, object]]:
+        return [{"symbol": "BTCUSDT", "positionAmt": "0" if self._flat else "1"}]
+
+    def get_algo_order(self, *, client_algo_id: str) -> dict[str, object]:
+        if client_algo_id.startswith("pr"):
+            return {"algoStatus": "FINISHED", "actualOrderId": "901"}
+        return {"algoStatus": "NEW", "actualOrderId": ""}
+
+    def cancel_algo_order(self, *, client_algo_id: str) -> dict[str, object]:
+        if self._cancel_error is not None:
+            raise self._cancel_error
+        self.cancelled.append(client_algo_id)
+        return {"code": "200", "msg": "success"}
+
+    def get_user_trades(self, symbol: str, *, start_time_ms: int) -> list[dict[str, object]]:
+        return [
+            {"side": "BUY", "qty": "1", "price": "100", "realizedPnl": "0", "commission": "0.04"},
+            {"side": "SELL", "qty": "1", "price": "94", "realizedPnl": "-6", "commission": "0.04"},
+        ]
+
+
+def _open_protected_position(factory, channel_id: int) -> TradeIntentRow:  # type: ignore[no-untyped-def]
+    """Approve, risk-evaluate and execute one BTCUSDT LONG, then add a resting
+    take-profit row, leaving a PROTECTED position for the monitor to find."""
+    _approve_signal(factory, channel_id)
+    run_risk_evaluation(
+        factory,
+        settings=_risk_settings(),
+        market_data_client=_FakeRiskMarketDataClient(Decimal("100")),
+        clock=lambda: RISK_NOW,
+    )
+    with factory() as session:
+        ((trade_intent, risk_decision),) = load_eligible_intents(session)
+    result = _execute_one(
+        factory,
+        trade_intent,
+        risk_decision,
+        settings=_risk_settings(),
+        market_data_client=_FakeExecutionMarketDataClient(),
+        trading_client=_ProtectionFailsOnceTradingClient(),
+        clock=lambda: RISK_NOW,
+        poll_timeout_seconds=0,
+        poll_interval_seconds=0,
+        protection_deadline_seconds=5,
+    )
+    assert result.final_state == "PROTECTED"
+    with factory.begin() as session:
+        session.add(
+            ExchangeOrder(
+                order_row_id=f"tp-row-{channel_id}",
+                intent_id=trade_intent.intent_id,
+                purpose="TAKE_PROFIT",
+                client_order_id=f"tp-{channel_id}",
+                symbol="BTCUSDT",
+                side="SELL",
+                order_type="TAKE_PROFIT_MARKET",
+                reduce_only=True,
+                status="NEW",
+            )
+        )
+    return trade_intent
+
+
+def _execution_events(factory, intent_id: str) -> dict[str, dict[str, object]]:  # type: ignore[no-untyped-def]
+    with factory() as session:
+        events = session.scalars(
+            select(OutboxEvent).where(OutboxEvent.aggregate_id == intent_id)
+        ).all()
+    return {event.event_type: event.payload for event in events}
+
+
+def test_position_monitor_reports_stop_loss_close_and_cancels_take_profit(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    trade_intent = _open_protected_position(factory, 840)
+    client = _PositionClosedByStopTradingClient()
+
+    results = run_position_monitor(factory, trading_client=client, clock=lambda: RISK_NOW)
+    again = run_position_monitor(factory, trading_client=client, clock=lambda: RISK_NOW)
+
+    assert [r.close_reason for r in results] == ["STOP_LOSS"]
+    assert again == []  # CLOSED is terminal: never notified twice
+    assert client.cancelled == ["tp-840"]
+    closed = _execution_events(factory, trade_intent.intent_id)["execution_position_closed"]
+    assert closed["close_reason"] == "停損觸發"
+    assert closed["exit_price"] == "94"
+    assert closed["realized_pnl"] == "-6"
+    assert closed["cancelled_leftover"] == "停利單"
+    with factory() as session:
+        states = session.scalars(
+            select(OrderLifecycle.state)
+            .where(OrderLifecycle.intent_id == trade_intent.intent_id)
+            .order_by(OrderLifecycle.revision)
+        ).all()
+        tp_status = session.scalar(
+            select(ExchangeOrder.status).where(ExchangeOrder.client_order_id == "tp-840")
+        )
+    assert states[-1] == "CLOSED"
+    assert tp_status == "CANCELED"
+
+
+def test_position_monitor_leaves_open_position_alone(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    trade_intent = _open_protected_position(factory, 841)
+    client = _PositionClosedByStopTradingClient(flat=False)
+
+    assert run_position_monitor(factory, trading_client=client, clock=lambda: RISK_NOW) == []
+    assert client.cancelled == []
+    assert "execution_position_closed" not in _execution_events(factory, trade_intent.intent_id)
+
+
+def test_position_monitor_notifies_when_leftover_cancel_fails(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    trade_intent = _open_protected_position(factory, 842)
+    client = _PositionClosedByStopTradingClient(
+        cancel_error=BinanceApiError(400, -1000, "cancel rejected")
+    )
+
+    run_position_monitor(factory, trading_client=client, clock=lambda: RISK_NOW)
+
+    events = _execution_events(factory, trade_intent.intent_id)
+    assert events["execution_position_closed"]["cancelled_leftover"] is None
+    assert "cancel rejected" in str(events["execution_leftover_cancel_failed"]["orders"])
+
+
+def test_risk_rejection_is_notified(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    _approve_signal(factory, 843)
+
+    run_risk_evaluation(
+        factory,
+        settings=_risk_settings(),
+        market_data_client=_FakeRiskMarketDataClient(None),
+        clock=lambda: RISK_NOW,
+    )
+
+    with factory() as session:
+        (event,) = session.scalars(
+            select(OutboxEvent).where(OutboxEvent.event_type == "execution_risk_rejected")
+        ).all()
+    assert event.payload["symbol"] == "BTCUSDT"
+    assert event.payload["reason_codes"] != "-"
+
+
+def test_worker_step_failure_is_notified_once_and_recovery_once(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    health = StepHealth()
+    times = iter(RISK_NOW + timedelta(seconds=i) for i in range(10))
+
+    for error in (RuntimeError("binance down"), RuntimeError("binance down"), None, None):
+        health.record(factory, "execution", error, now=next(times))
+
+    with factory() as session:
+        events = session.scalars(
+            select(OutboxEvent)
+            .where(OutboxEvent.aggregate_type == "execution_worker")
+            .order_by(OutboxEvent.recorded_at)
+        ).all()
+    assert [e.event_type for e in events] == [
+        "execution_worker_error",
+        "execution_worker_recovered",
+    ]
+    assert "binance down" in events[0].payload["error"]

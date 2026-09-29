@@ -61,6 +61,9 @@ _EXECUTION_FAILURE_EVENT_TYPES = frozenset(
         "execution_protection_failed",
         "execution_take_profit_failed",
         "execution_unexpected_error",
+        "execution_risk_rejected",
+        "execution_leftover_cancel_failed",
+        "execution_worker_error",
     }
 )
 _HANDLED_CALLBACK_ID_CHARS = 32
@@ -284,6 +287,13 @@ _EXECUTION_EVENT_TITLES: dict[str, str] = {
     "execution_take_profit_confirmed": "🎯 停利單已掛上",
     "execution_take_profit_failed": "⚠️ 停利單掛單失敗",
     "execution_unexpected_error": "🔥 執行過程發生未預期錯誤",
+    "execution_risk_rejected": "🚫 風控未通過，這筆訊號不會下單",
+    "execution_position_closed": "🏁 倉位已平倉",
+    "execution_leftover_cancel_failed": (
+        "⚠️ 平倉後剩下的停損/停利單取消失敗——請到 Binance 手動取消，否則之後同幣種的新倉可能被它平掉"
+    ),
+    "execution_worker_error": "🔥 自動執行服務出錯（會持續重試，恢復時會再通知）",
+    "execution_worker_recovered": "✅ 自動執行服務已恢復",
 }
 _REMINDER_HEADER = "⏰ 提醒：這則失敗通知 5 分鐘內尚未處理"
 _HANDLED_FOOTER = "✅ 已標記為已處理"

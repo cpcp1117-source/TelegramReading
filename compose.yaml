@@ -180,7 +180,7 @@ services:
     build:
       context: .
       target: runtime
-    command: ["python", "scripts/execute_trade_intents.py"]
+    command: ["python", "-m", "telegram_trader.execution_worker"]
     environment:
       APP_ENVIRONMENT: execution_gateway
       APP_DATABASE_HOST: db
@@ -195,7 +195,14 @@ services:
       BINANCE_TESTNET_API_SECRET: ${BINANCE_TESTNET_API_SECRET:-}
       BINANCE_TESTNET_BASE_URL: ${BINANCE_TESTNET_BASE_URL:-https://demo-fapi.binance.com}
       RISK_LEVERAGE: ${RISK_LEVERAGE:-5}
+      RISK_DEFAULT_STOP_ROE_PCT: ${RISK_DEFAULT_STOP_ROE_PCT:-0.30}
+      RISK_POSITION_SIZE_PCT: ${RISK_POSITION_SIZE_PCT:-0.20}
       RISK_MAX_CONCURRENT_POSITIONS: ${RISK_MAX_CONCURRENT_POSITIONS:-3}
+      RISK_DAILY_LOSS_KILL_SWITCH_PCT: ${RISK_DAILY_LOSS_KILL_SWITCH_PCT:-0.06}
+      RISK_MAX_RECEIVE_LAG_SECONDS: ${RISK_MAX_RECEIVE_LAG_SECONDS:-10}
+      RISK_MAX_PRICE_DEVIATION_BPS: ${RISK_MAX_PRICE_DEVIATION_BPS:-50}
+      RISK_EQUITY_BASELINE_USDT: ${RISK_EQUITY_BASELINE_USDT:-}
+      RISK_DECISION_EXPIRY_SECONDS: ${RISK_DECISION_EXPIRY_SECONDS:-300}
     depends_on:
       db:
         condition: service_healthy
@@ -209,10 +216,14 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-    # Deliberately not unless-stopped: this is a one-shot script, and an
-    # auto-restart mid-order-placement after a crash is a real double-submit
-    # risk this service must never have. A human re-triggers it deliberately.
-    restart: "no"
+    # Long-running since 2026-09-29 (execution_worker). Restarting is safe: an
+    # intent with any order_lifecycle row is never picked up again and the entry
+    # is looked up by clientOrderId before placement, so a restart cannot submit
+    # twice -- at worst one interrupted intent is left for the user, who is notified.
+    # SIGTERM finishes the current cycle; the grace period covers a full entry
+    # fill poll (30s) plus protection/take-profit placement and retries.
+    restart: unless-stopped
+    stop_grace_period: 90s
 
 volumes:
   postgres_data:

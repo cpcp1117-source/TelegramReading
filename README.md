@@ -75,6 +75,17 @@ Invoke-RestMethod http://127.0.0.1:8080/health/ready
 
 PostgreSQL 只會在第一次建立 volume 時套用 `POSTGRES_PASSWORD`。若既有 volume 需要改密碼，必須在資料庫內輪替；只修改環境變數會造成驗證失敗。僅在確認本機測試資料可刪除時，才可使用 `docker compose down --volumes`重建。
 
+### Execution Worker (Phase 6, Testnet)
+
+核准訊號後由常駐的 `execution-gateway` service 自動完成風控計算、下單、停損/停利，並在倉位平倉時通知（每 5 秒一輪）。所有失敗都只通知、由使用者處理。
+
+```powershell
+docker compose --profile execution-gateway up -d --build execution-gateway
+docker compose logs -f execution-gateway
+```
+
+`docker compose stop execution-gateway` 會等目前這一輪跑完才結束（最多 90 秒），不要用 `kill`。
+
 ### PostgreSQL Integration Tests
 
 `test` service 連線到獨立的 `telegram_trader_test`，不是正式的 `telegram_trader`；整合測試會 `TRUNCATE … CASCADE`，若指向正式資料庫會清掉真實下單紀錄，fixture 也會拒絕名稱不是 `_test` 結尾的資料庫。全新 volume 會由 `docker/postgres-init/` 自動建立測試資料庫；既有 volume 需先手動建立一次：

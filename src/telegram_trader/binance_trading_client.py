@@ -18,6 +18,7 @@ _LEVERAGE_PATH = "/fapi/v1/leverage"
 _MARGIN_TYPE_PATH = "/fapi/v1/marginType"
 _ORDER_PATH = "/fapi/v1/order"
 _ALGO_ORDER_PATH = "/fapi/v1/algoOrder"
+_USER_TRADES_PATH = "/fapi/v1/userTrades"
 
 _MARGIN_TYPE_ALREADY_SET = -4046
 
@@ -181,6 +182,24 @@ class BinanceTradingClient:
         if algo_id is not None:
             params["algoId"] = algo_id
         result: dict[str, Any] = self._signed_request("GET", _ALGO_ORDER_PATH, params=params)
+        return result
+
+    def cancel_algo_order(self, *, client_algo_id: str) -> dict[str, Any]:
+        """`DELETE /fapi/v1/algoOrder` -- cancels a still-open conditional order."""
+        result: dict[str, Any] = self._signed_request(
+            "DELETE", _ALGO_ORDER_PATH, params={"clientAlgoId": client_algo_id}
+        )
+        return result
+
+    def get_user_trades(self, symbol: str, *, start_time_ms: int) -> list[dict[str, Any]]:
+        """`GET /fapi/v1/userTrades` -- this account's own fills on `symbol` since
+        `start_time_ms` (Binance caps one call at 7 days and 1000 trades).
+        """
+        result: list[dict[str, Any]] = self._signed_request(
+            "GET",
+            _USER_TRADES_PATH,
+            params={"symbol": symbol, "startTime": start_time_ms, "limit": 1000},
+        )
         return result
 
     def close(self) -> None:

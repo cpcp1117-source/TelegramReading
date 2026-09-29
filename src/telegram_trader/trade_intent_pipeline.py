@@ -43,6 +43,7 @@ from telegram_trader.models import (
 )
 from telegram_trader.models import RiskDecision as RiskDecisionRow
 from telegram_trader.models import TradeIntent as TradeIntentRow
+from telegram_trader.outbox import append_outbox_event
 from telegram_trader.risk_engine import (
     REASON_SIGNAL_NOT_VALIDATED,
     AccountState,
@@ -223,6 +224,29 @@ def _create_trade_intent(
     row = session.get(TradeIntentRow, intent_id)
     assert row is not None
     return row
+
+
+def _notify_risk_rejected(
+    session: Session, intent: TradeIntentRow, evaluation: RiskEvaluation
+) -> None:
+    """Semi-automatic bot (2026-09-29, explicit user request): an approved signal the
+    Risk Engine refuses must reach the user, not just the database. Uses the
+    `execution_` prefix so Control Bot's existing execution-event loop forwards it.
+    """
+    append_outbox_event(
+        session,
+        event_id=hashlib.sha256(
+            f"outbox:{intent.intent_id}:execution_risk_rejected".encode()
+        ).hexdigest(),
+        event_type="execution_risk_rejected",
+        aggregate_type="trade_intent",
+        aggregate_id=intent.intent_id,
+        payload={
+            "symbol": intent.symbol,
+            "side": intent.side,
+            "reason_codes": ", ".join(evaluation.reason_codes) or "-",
+        },
+    )
 
 
 def _record_risk_decision(
@@ -410,6 +434,7 @@ def run_risk_evaluation(
                     now=now,
                     expiry_seconds=settings.risk_decision_expiry_seconds,
                 )
+                _notify_risk_rejected(session, intent, evaluation)
                 results.append(
                     RiskPipelineResult(
                         intent_id=intent.intent_id,
@@ -477,6 +502,8 @@ def run_risk_evaluation(
                 now=now,
                 expiry_seconds=settings.risk_decision_expiry_seconds,
             )
+            if resolved_status == "RISK_REJECTED":
+                _notify_risk_rejected(session, intent, evaluation)
             account = _apply_approved_intent_to_account(
                 account, intent, evaluation, leverage=config.leverage
             )
