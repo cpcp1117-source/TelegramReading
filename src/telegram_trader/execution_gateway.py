@@ -460,14 +460,23 @@ def _place_order_idempotent(
             symbol=symbol, newClientOrderId=client_order_id, **params
         )
         return result
-    except Exception:
+    except Exception as place_error:
         LOGGER.warning(
             "order placement raised; querying by client_order_id before any retry",
             extra={"context": {"symbol": symbol, "client_order_id": client_order_id}},
         )
-        existing: dict[str, Any] = trading_client.get_order(
-            symbol, orig_client_order_id=client_order_id
-        )
+        try:
+            existing: dict[str, Any] = trading_client.get_order(
+                symbol, orig_client_order_id=client_order_id
+            )
+        except BinanceApiError as lookup_error:
+            if lookup_error.code == _ORDER_DOES_NOT_EXIST:
+                # Definitely not placed: surface the real reason, not the lookup's -2013.
+                raise place_error from None
+            raise RuntimeError(
+                f"order placement failed ({place_error!r}) and its outcome is unknown: "
+                f"lookup by client_order_id also failed ({lookup_error!r})"
+            ) from lookup_error
         return existing
 
 
@@ -765,9 +774,34 @@ def _execute_one(
     entry_order_params["quantity"] = str(quantity)
 
     # --- Step 5: place entry order (idempotent) ---
-    entry_response = _place_order_idempotent(
-        trading_client, symbol, entry_client_order_id, **entry_order_params
-    )
+    try:
+        entry_response = _place_order_idempotent(
+            trading_client, symbol, entry_client_order_id, **entry_order_params
+        )
+    except Exception as error:
+        # Notify only, never resubmit (2026-09-29, explicit user request). The
+        # revision-0 lifecycle row stays, so no later run picks this intent up again.
+        LOGGER.exception(
+            "entry order placement failed; notifying, not retrying",
+            extra={"context": {"intent_id": intent_id, "symbol": symbol}},
+        )
+        with session_factory.begin() as session:
+            _notify(
+                session,
+                intent_id=intent_id,
+                event_type="execution_entry_failed",
+                payload={
+                    "symbol": symbol,
+                    "side": side,
+                    "entry_type": entry_order_params["type"],
+                    "quantity": str(quantity),
+                    "price": entry_order_params.get("price"),
+                    "client_order_id": entry_client_order_id,
+                    "reason": repr(error),
+                },
+                now=clock(),
+            )
+        return ExecutionResult(intent_id, symbol, "ENTRY_FAILED", repr(error))
     entry_order_row_id = _order_row_id(entry_client_order_id)
     with session_factory.begin() as session:
         _write_exchange_order(

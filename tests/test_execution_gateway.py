@@ -577,3 +577,33 @@ def test_place_with_one_retry_skips_retry_when_5_second_window_has_passed() -> N
     assert attempts == 1
     assert placer.client_order_ids == ["pr1"]
     assert attempt.failure_reason is not None and "not started within 5s" in attempt.failure_reason
+
+
+def test_place_order_idempotent_surfaces_real_reason_when_order_definitely_not_placed() -> None:
+    client = _FakeTradingClient()
+    client._get_order_errors = [_order_does_not_exist(), _order_does_not_exist()]
+    client._place_side_effect = BinanceApiError(400, -2019, "Margin is insufficient.")
+
+    with pytest.raises(BinanceApiError, match="Margin is insufficient"):
+        _place_order_idempotent(
+            client, "XRPUSDT", "abc123", side="BUY", type="MARKET", quantity="1"
+        )
+
+    assert len(client.place_calls) == 1
+
+
+def test_place_order_idempotent_reports_both_errors_when_outcome_unknown() -> None:
+    client = _FakeTradingClient()
+    client._get_order_errors = [
+        _order_does_not_exist(),
+        BinanceApiError(503, None, "service unavailable"),
+    ]
+    client._place_side_effect = BinanceApiError(500, None, "timeout")
+
+    with pytest.raises(RuntimeError, match="outcome is unknown") as raised:
+        _place_order_idempotent(
+            client, "XRPUSDT", "abc123", side="BUY", type="MARKET", quantity="1"
+        )
+
+    assert "timeout" in str(raised.value) and "service unavailable" in str(raised.value)
+    assert len(client.place_calls) == 1

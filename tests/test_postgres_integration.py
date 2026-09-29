@@ -2726,3 +2726,58 @@ def test_execute_one_retries_failed_protection_and_notifies_each_attempt(engine:
     assert "rejected" in by_type["execution_protection_retrying"]["reason"]
     assert by_type["execution_protection_confirmed"]["attempt"] == 2
     assert "execution_protection_failed" not in by_type
+
+
+class _EntryAlwaysFailsTradingClient(_ProtectionFailsOnceTradingClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.place_order_calls = 0
+
+    def get_order(self, symbol: str, *, orig_client_order_id: str) -> dict[str, object]:
+        raise BinanceApiError(400, -2013, "Order does not exist.")
+
+    def place_order(self, **params: object) -> dict[str, object]:
+        self.place_order_calls += 1
+        raise BinanceApiError(400, -2019, "Margin is insufficient.")
+
+
+def test_execute_one_notifies_failed_entry_and_never_resubmits_it(engine: Engine) -> None:
+    """2026-09-29, explicit user request: a failed entry is notified, not retried --
+    neither within this run nor by a later one."""
+    factory = create_session_factory(engine)
+    _approve_signal(factory, 832)
+    run_risk_evaluation(
+        factory,
+        settings=_risk_settings(),
+        market_data_client=_FakeRiskMarketDataClient(Decimal("100")),
+        clock=lambda: RISK_NOW,
+    )
+    with factory() as session:
+        ((trade_intent, risk_decision),) = load_eligible_intents(session)
+    trading_client = _EntryAlwaysFailsTradingClient()
+
+    result = _execute_one(
+        factory,
+        trade_intent,
+        risk_decision,
+        settings=_risk_settings(),
+        market_data_client=_FakeExecutionMarketDataClient(),
+        trading_client=trading_client,
+        clock=lambda: RISK_NOW,
+        poll_timeout_seconds=0,
+        poll_interval_seconds=0,
+        protection_deadline_seconds=5,
+    )
+
+    assert result.final_state == "ENTRY_FAILED"
+    assert trading_client.place_order_calls == 1
+    assert trading_client.algo_client_ids == []
+    with factory() as session:
+        (event,) = session.scalars(
+            select(OutboxEvent).where(
+                OutboxEvent.aggregate_id == trade_intent.intent_id,
+                OutboxEvent.event_type == "execution_entry_failed",
+            )
+        ).all()
+        assert "Margin is insufficient" in event.payload["reason"]
+        assert load_eligible_intents(session) == []

@@ -224,6 +224,9 @@ _EXECUTION_EVENT_TITLES: dict[str, str] = {
     "execution_skipped_expired": "⏰ 訊號已過期，未執行下單",
     "execution_cancelled": "🚫 下單已取消",
     "execution_entry_submitted": "📤 進場單已送出",
+    "execution_entry_failed": (
+        "❌ 進場單掛單失敗——不會自動重試。請到 Binance 確認是否有這筆單（client_order_id）"
+    ),
     "execution_entry_not_filled": "⚠️ 進場單逾時未成交",
     "execution_entry_filled": "✅ 進場單已成交",
     "execution_protection_retrying": "⚠️ 停損單第一次掛單失敗，5 秒內重試一次",
