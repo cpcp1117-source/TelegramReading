@@ -18,7 +18,12 @@ from telegram_trader.config import Settings, get_settings
 from telegram_trader.db import create_db_engine, create_session_factory
 from telegram_trader.logging_config import configure_logging
 from telegram_trader.models import NormalizedSignal, OutboxEvent, SignalDecisionRequest
-from telegram_trader.outbox import OutboxConsumer, load_pending_events
+from telegram_trader.outbox import (
+    OutboxConsumer,
+    find_event_by_id_prefix,
+    load_events_due_for_reminder,
+    load_pending_events,
+)
 from telegram_trader.risk_engine import RiskConfig, RiskEvaluation
 from telegram_trader.signal_decisions import (
     DecisionAction,
@@ -40,10 +45,30 @@ from telegram_trader.trade_intent_pipeline import preview_trade_intent, risk_con
 LOGGER = logging.getLogger(__name__)
 
 _EXECUTION_OUTBOX_CONSUMER_NAME = "control_bot"
+# Receipts under these names mean "user marked it handled" / "reminder already sent"
+# (2026-09-29, explicit user request: a failure not handled within 5 minutes is sent
+# once more). Reusing outbox_delivery_receipts keeps this schema-free.
+_EXECUTION_HANDLED_CONSUMER_NAME = "control_bot_handled"
+_EXECUTION_REMINDER_CONSUMER_NAME = "control_bot_reminder"
+_FAILURE_REMINDER_DELAY = timedelta(minutes=5)
+# Failures the user must act on. `*_retrying` is excluded: its final outcome follows.
+_EXECUTION_FAILURE_EVENT_TYPES = frozenset(
+    {
+        "execution_skipped_expired",
+        "execution_cancelled",
+        "execution_entry_failed",
+        "execution_entry_not_filled",
+        "execution_protection_failed",
+        "execution_take_profit_failed",
+        "execution_unexpected_error",
+    }
+)
+_HANDLED_CALLBACK_ID_CHARS = 32
 _CALLBACK_SEP = ":"
 _CALLBACK_PREFIX_SIGNAL = "signal"
 _CALLBACK_PREFIX_CLOSE_ALL = "close_all"
 _CALLBACK_PREFIX_EDIT = "edit"
+_CALLBACK_PREFIX_HANDLED = "handled"
 _CLOSE_ALL_CONFIRM_WINDOW_SECONDS = 30
 _EDIT_REPLY_WINDOW_SECONDS = 120
 _EDIT_FIELD_LABELS: dict[EditableField, str] = {"STOP": "停損", "TAKE_PROFIT": "停利"}
@@ -130,6 +155,29 @@ def decode_edit_field_callback(data: bytes) -> tuple[str, EditableField] | None:
     if field not in ("STOP", "TAKE_PROFIT"):
         return None
     return nonce, cast(EditableField, field)
+
+
+def encode_handled_callback(event_id: str) -> bytes:
+    """`"handled:<first 32 hex chars of event_id>"` -- 40 bytes, under Telegram's
+    64-byte cap; resolved back via `outbox.find_event_by_id_prefix`.
+    """
+    prefix = event_id[:_HANDLED_CALLBACK_ID_CHARS]
+    return f"{_CALLBACK_PREFIX_HANDLED}{_CALLBACK_SEP}{prefix}".encode()
+
+
+def decode_handled_callback(data: bytes) -> str | None:
+    try:
+        text = data.decode()
+    except UnicodeDecodeError:
+        return None
+    parts = text.split(_CALLBACK_SEP)
+    if len(parts) != 2 or parts[0] != _CALLBACK_PREFIX_HANDLED or not parts[1]:
+        return None
+    return parts[1]
+
+
+def _handled_buttons(event_id: str) -> list[list[Any]]:
+    return [[Button.inline("✅ 我已處理", encode_handled_callback(event_id))]]
 
 
 def _format_decimal(value: Decimal) -> str:
@@ -237,6 +285,8 @@ _EXECUTION_EVENT_TITLES: dict[str, str] = {
     "execution_take_profit_failed": "⚠️ 停利單掛單失敗",
     "execution_unexpected_error": "🔥 執行過程發生未預期錯誤",
 }
+_REMINDER_HEADER = "⏰ 提醒：這則失敗通知 5 分鐘內尚未處理"
+_HANDLED_FOOTER = "✅ 已標記為已處理"
 
 
 def format_execution_notification(event: OutboxEvent) -> str:
@@ -417,10 +467,40 @@ class ControlBot:
                 event_type_prefix="execution_",
             )
             for event in pending:
+                is_failure = event.event_type in _EXECUTION_FAILURE_EVENT_TYPES
                 await self._client.send_message(
-                    self._allowlisted_user_id, format_execution_notification(event)
+                    self._allowlisted_user_id,
+                    format_execution_notification(event),
+                    buttons=_handled_buttons(event.event_id) if is_failure else None,
                 )
                 consumer = OutboxConsumer(self._session_factory, _EXECUTION_OUTBOX_CONSUMER_NAME)
+                consumer.acknowledge(event.event_id)
+                count += 1
+        return count
+
+    async def remind_unhandled_failures(self) -> int:
+        """Sends each failure notification once more if the user has not pressed
+        "我已處理" within 5 minutes of its delivery (2026-09-29, explicit user
+        request -- this is a semi-automatic bot: failures are the user's to handle,
+        the bot only makes sure they are seen). Exactly one reminder per failure.
+        """
+        count = 0
+        with self._session_factory() as session:
+            due = load_events_due_for_reminder(
+                session,
+                event_types=_EXECUTION_FAILURE_EVENT_TYPES,
+                delivered_consumer=_EXECUTION_OUTBOX_CONSUMER_NAME,
+                handled_consumer=_EXECUTION_HANDLED_CONSUMER_NAME,
+                reminded_consumer=_EXECUTION_REMINDER_CONSUMER_NAME,
+                delivered_before=self._clock() - _FAILURE_REMINDER_DELAY,
+            )
+            for event in due:
+                await self._client.send_message(
+                    self._allowlisted_user_id,
+                    f"{_REMINDER_HEADER}\n\n{format_execution_notification(event)}",
+                    buttons=_handled_buttons(event.event_id),
+                )
+                consumer = OutboxConsumer(self._session_factory, _EXECUTION_REMINDER_CONSUMER_NAME)
                 consumer.acknowledge(event.event_id)
                 count += 1
         return count
@@ -431,6 +511,7 @@ class ControlBot:
             await asyncio.sleep(self._execution_poll_interval_seconds)
             try:
                 await self.notify_execution_events()
+                await self.remind_unhandled_failures()
                 attempt = 0
             except asyncio.CancelledError:
                 raise
@@ -528,6 +609,11 @@ class ControlBot:
             return
 
         data = event.data
+        handled_prefix = decode_handled_callback(data)
+        if handled_prefix is not None:
+            await self._mark_failure_handled(event, handled_prefix)
+            return
+
         close_all_nonce = decode_close_all_callback(data)
         if close_all_nonce is not None:
             still_valid = (
@@ -596,6 +682,20 @@ class ControlBot:
             return
         await event.edit(_OUTCOME_MESSAGES[outcome], buttons=None)
         await event.answer()
+
+    async def _mark_failure_handled(self, event: Any, event_id_prefix: str) -> None:
+        with self._session_factory() as session:
+            outbox_event = find_event_by_id_prefix(session, event_id_prefix)
+        if outbox_event is None:
+            await event.answer("找不到這則通知", alert=True)
+            return
+        result = OutboxConsumer(
+            self._session_factory, _EXECUTION_HANDLED_CONSUMER_NAME
+        ).acknowledge(outbox_event.event_id)
+        await event.edit(
+            f"{format_execution_notification(outbox_event)}\n\n{_HANDLED_FOOTER}", buttons=None
+        )
+        await event.answer("之前已經標記過了" if result.duplicate else "已標記為已處理，不會再提醒")
 
     async def run_connection(self) -> None:
         await self._client.start(bot_token=self._bot_token)

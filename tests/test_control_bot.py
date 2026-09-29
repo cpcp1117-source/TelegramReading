@@ -17,9 +17,11 @@ from telegram_trader.control_bot import (
     _PendingEdit,
     decode_close_all_callback,
     decode_edit_field_callback,
+    decode_handled_callback,
     decode_signal_callback,
     encode_close_all_callback,
     encode_edit_field_callback,
+    encode_handled_callback,
     encode_signal_callback,
     format_execution_notification,
     format_signal_notification,
@@ -584,3 +586,17 @@ async def test_run_forever_cancels_poll_task_cleanly() -> None:
         await task
 
     assert asyncio.all_tasks() - before == set()
+
+
+def test_handled_callback_round_trips_within_telegram_64_byte_cap() -> None:
+    event_id = "ab" * 32
+    data = encode_handled_callback(event_id)
+    assert len(data) <= 64
+    assert decode_handled_callback(data) == event_id[:32]
+
+
+def test_handled_callback_is_not_confused_with_other_callbacks() -> None:
+    assert decode_handled_callback(encode_close_all_callback("nonce")) is None
+    assert decode_handled_callback(b"handled:") is None
+    assert decode_handled_callback(bytes([0xFF])) is None
+    assert decode_close_all_callback(encode_handled_callback("ab" * 32)) is None

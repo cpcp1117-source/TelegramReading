@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import os
@@ -29,6 +30,7 @@ from telegram_trader.channel_policy import (
     resolve_effective_targets,
 )
 from telegram_trader.config import Settings, TelegramChannelTarget, get_settings
+from telegram_trader.control_bot import ControlBot, encode_handled_callback
 from telegram_trader.db import create_db_engine, create_session_factory, database_is_ready
 from telegram_trader.execution_gateway import _execute_one, load_eligible_intents
 from telegram_trader.mock_telegram import (
@@ -59,7 +61,7 @@ from telegram_trader.models import Thesis as ThesisRow
 from telegram_trader.models import TradeIntent as TradeIntentRow
 from telegram_trader.normalize_content import NormalizationResult, run_normalization
 from telegram_trader.openai_client import OpenAiClientError
-from telegram_trader.outbox import OutboxConsumer
+from telegram_trader.outbox import OutboxConsumer, append_outbox_event
 from telegram_trader.parse_signals import SignalParsingResult, run_signal_parsing
 from telegram_trader.retention_cleanup import run_retention_cleanup
 from telegram_trader.signal_decisions import (
@@ -2781,3 +2783,121 @@ def test_execute_one_notifies_failed_entry_and_never_resubmits_it(engine: Engine
         ).all()
         assert "Margin is insufficient" in event.payload["reason"]
         assert load_eligible_intents(session) == []
+
+
+# --- Control Bot failure reminders (2026-09-29, explicit user request) ---
+
+
+class _RecordingBotClient:
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, object]] = []
+
+    async def send_message(self, user_id: int, text: str, buttons: object = None) -> object:
+        self.sent.append((text, buttons))
+        return type("_Message", (), {"id": len(self.sent)})()
+
+
+class _CallbackEvent:
+    def __init__(self, data: bytes) -> None:
+        self.sender_id = 555
+        self.data = data
+        self.id = 1
+        self.edits: list[tuple[str, object]] = []
+        self.answers: list[tuple[str | None, bool]] = []
+
+    async def edit(self, text: str, buttons: object = None) -> None:
+        self.edits.append((text, buttons))
+
+    async def answer(self, text: str | None = None, alert: bool = False) -> None:
+        self.answers.append((text, alert))
+
+
+def _control_bot(factory, client: _RecordingBotClient, minutes_later: float = 0):  # type: ignore[no-untyped-def]
+    return ControlBot(
+        client,
+        factory,
+        bot_token="placeholder",
+        allowlisted_user_id=555,
+        clock=lambda: datetime.now(UTC) + timedelta(minutes=minutes_later),
+    )
+
+
+def _append_execution_event(factory, event_type: str, event_id: str) -> None:  # type: ignore[no-untyped-def]
+    with factory.begin() as session:
+        append_outbox_event(
+            session,
+            event_id=event_id,
+            event_type=event_type,
+            aggregate_type="trade_intent",
+            aggregate_id="intent-reminder",
+            payload={"symbol": "XRPUSDT", "reason": "Margin is insufficient."},
+        )
+
+
+def test_control_bot_failure_gets_handled_button_success_does_not(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    _append_execution_event(factory, "execution_entry_failed", "a" * 64)
+    _append_execution_event(factory, "execution_entry_filled", "b" * 64)
+    client = _RecordingBotClient()
+
+    asyncio.run(_control_bot(factory, client).notify_execution_events())
+
+    by_title = {text.splitlines()[0]: buttons for text, buttons in client.sent}
+    assert by_title["✅ 進場單已成交"] is None
+    failure_buttons = next(b for t, b in by_title.items() if t.startswith("❌ 進場單掛單失敗"))
+    assert failure_buttons is not None
+
+
+def test_control_bot_reminds_unhandled_failure_once_after_5_minutes(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    _append_execution_event(factory, "execution_protection_failed", "c" * 64)
+    _append_execution_event(factory, "execution_protection_confirmed", "d" * 64)
+    client = _RecordingBotClient()
+    asyncio.run(_control_bot(factory, client).notify_execution_events())
+
+    assert (
+        asyncio.run(_control_bot(factory, client, minutes_later=4).remind_unhandled_failures()) == 0
+    )
+    assert (
+        asyncio.run(_control_bot(factory, client, minutes_later=6).remind_unhandled_failures()) == 1
+    )
+    assert (
+        asyncio.run(_control_bot(factory, client, minutes_later=60).remind_unhandled_failures())
+        == 0
+    )
+
+    reminder_text, reminder_buttons = client.sent[-1]
+    assert reminder_text.startswith("⏰ 提醒")
+    assert "停損單掛單失敗" in reminder_text
+    assert reminder_buttons is not None
+
+
+def test_control_bot_handled_button_stops_reminder(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    event_id = "e" * 64
+    _append_execution_event(factory, "execution_unexpected_error", event_id)
+    client = _RecordingBotClient()
+    bot = _control_bot(factory, client)
+    asyncio.run(bot.notify_execution_events())
+
+    press = _CallbackEvent(encode_handled_callback(event_id))
+    asyncio.run(bot._on_callback(press))
+    press_again = _CallbackEvent(encode_handled_callback(event_id))
+    asyncio.run(bot._on_callback(press_again))
+
+    assert press.edits and press.edits[0][0].endswith("✅ 已標記為已處理")
+    assert press.edits[0][1] is None
+    assert press_again.answers == [("之前已經標記過了", False)]
+    assert (
+        asyncio.run(_control_bot(factory, client, minutes_later=6).remind_unhandled_failures()) == 0
+    )
+
+
+def test_control_bot_handled_button_rejects_unknown_event(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    press = _CallbackEvent(encode_handled_callback("f" * 64))
+
+    asyncio.run(_control_bot(factory, _RecordingBotClient())._on_callback(press))
+
+    assert press.answers == [("找不到這則通知", True)]
+    assert press.edits == []

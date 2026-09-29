@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -27,6 +29,50 @@ def load_pending_events(
         stmt = stmt.where(OutboxEvent.event_type.startswith(event_type_prefix))
     stmt = stmt.order_by(OutboxEvent.recorded_at)
     return list(session.scalars(stmt))
+
+
+def load_events_due_for_reminder(
+    session: Session,
+    *,
+    event_types: Collection[str],
+    delivered_consumer: str,
+    handled_consumer: str,
+    reminded_consumer: str,
+    delivered_before: datetime,
+) -> list[OutboxEvent]:
+    """Events of `event_types` that `delivered_consumer` delivered at or before
+    `delivered_before`, and that neither `handled_consumer` nor
+    `reminded_consumer` has a receipt for yet, oldest first.
+    """
+    delivered = select(OutboxDeliveryReceipt.event_id).where(
+        OutboxDeliveryReceipt.consumer_name == delivered_consumer,
+        OutboxDeliveryReceipt.delivered_at <= delivered_before,
+    )
+    settled = select(OutboxDeliveryReceipt.event_id).where(
+        OutboxDeliveryReceipt.consumer_name.in_((handled_consumer, reminded_consumer))
+    )
+    stmt = (
+        select(OutboxEvent)
+        .where(
+            OutboxEvent.event_type.in_(tuple(event_types)),
+            OutboxEvent.event_id.in_(delivered),
+            OutboxEvent.event_id.not_in(settled),
+        )
+        .order_by(OutboxEvent.recorded_at)
+    )
+    return list(session.scalars(stmt))
+
+
+def find_event_by_id_prefix(session: Session, prefix: str) -> OutboxEvent | None:
+    """Resolves a Telegram button's truncated event id (callback data is capped at
+    64 bytes, too small for the full 64-char id). `None` if absent or ambiguous.
+    """
+    if not prefix or not all(char in "0123456789abcdef" for char in prefix):
+        return None
+    matches = list(
+        session.scalars(select(OutboxEvent).where(OutboxEvent.event_id.startswith(prefix)).limit(2))
+    )
+    return matches[0] if len(matches) == 1 else None
 
 
 def append_outbox_event(
