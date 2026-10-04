@@ -97,7 +97,11 @@ def _take_profit_values(setup: AnalysisSetup) -> list[str]:
 
 
 def _create_signal(
-    session: Session, setup: AnalysisSetup, transition: SetupTransition, now: datetime
+    session: Session,
+    setup: AnalysisSetup,
+    transition: SetupTransition,
+    now: datetime,
+    suggested_size_pct: Decimal | None,
 ) -> str:
     """Insert the `VALIDATED` signal the existing approval pipeline consumes; return its id."""
     assert transition.entry_price is not None
@@ -131,6 +135,7 @@ def _create_signal(
             link_method=None,
             parser_version=parser_version,
             expires_at=now + _SIGNAL_VALIDITY,
+            suggested_size_pct=suggested_size_pct,
         )
     )
     return signal_id
@@ -160,7 +165,11 @@ def _emit(session: Session, setup: AnalysisSetup, event_type: str, payload: dict
 
 
 def apply_transition(
-    session: Session, setup: AnalysisSetup, transition: SetupTransition, now: datetime
+    session: Session,
+    setup: AnalysisSetup,
+    transition: SetupTransition,
+    now: datetime,
+    suggested_size_pct: Decimal | None = None,
 ) -> tuple[bool, bool, bool]:
     """Persist `transition` onto `setup`; returns `(touched, triggered, closed)` flags."""
     touched = triggered = closed = False
@@ -182,7 +191,7 @@ def apply_transition(
         setup.status = "TRIGGERED"
         setup.triggered_at = transition.triggered_at
         setup.touched_at = setup.touched_at or transition.touched_at
-        setup.signal_id = _create_signal(session, setup, transition, now)
+        setup.signal_id = _create_signal(session, setup, transition, now, suggested_size_pct)
         _emit(
             session,
             setup,
@@ -215,6 +224,7 @@ def run_setup_monitor(
     market_client: Any,
     *,
     interval: str = "15m",
+    suggested_size_pct: Decimal | None = None,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> SetupMonitorResult:
     interval_seconds = _INTERVAL_SECONDS[interval]
@@ -243,7 +253,9 @@ def run_setup_monitor(
                 transition = evaluate_candles(
                     _state_of(setup), parse_candles(rows), now=now, max_trigger_age=_MAX_TRIGGER_AGE
                 )
-                touched, triggered, closed = apply_transition(session, setup, transition, now)
+                touched, triggered, closed = apply_transition(
+                    session, setup, transition, now, suggested_size_pct
+                )
                 checked += 1
                 touched_count += touched
                 triggered_count += triggered

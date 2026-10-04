@@ -416,6 +416,9 @@ class NormalizedSignal(Base):
     link_method: Mapped[str | None] = mapped_column(String(20), nullable=True)
     parser_version: Mapped[str] = mapped_column(String(20), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # A producer's suggested size (fraction of equity used as margin), e.g. a smaller default for
+    # analysis-channel drafts; becomes the draft's starting size. NULL = configured default.
+    suggested_size_pct: Mapped[Decimal | None] = mapped_column(Numeric(6, 4), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -522,6 +525,11 @@ class SignalDecisionEvent(Base):
     outcome: Mapped[str] = mapped_column(String(20), nullable=False)
     approved_stop_value: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
     approved_take_profits: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    # Entry/size as edited by the user before approving; NULL = the signal's own entry / the
+    # configured default size.
+    approved_entry_type: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    approved_entry_value: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    approved_position_size_pct: Mapped[Decimal | None] = mapped_column(Numeric(6, 4), nullable=True)
     decided_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -555,6 +563,9 @@ class SignalDecisionEdit(Base):
     revision: Mapped[int] = mapped_column(Integer, nullable=False)
     stop_value: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
     take_profits: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default="[]")
+    entry_type: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    entry_value: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    position_size_pct: Mapped[Decimal | None] = mapped_column(Numeric(6, 4), nullable=True)
     edited_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

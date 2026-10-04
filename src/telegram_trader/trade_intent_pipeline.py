@@ -54,8 +54,12 @@ from telegram_trader.risk_engine import (
     TradeIntentInput,
     evaluate_trade_intent,
 )
+from telegram_trader.signal_decisions import DraftValues
 
 LOGGER = logging.getLogger(__name__)
+
+ADVISORY_ENTRY_FAR_FROM_MARKET = "ENTRY_FAR_FROM_MARKET"
+_ENTRY_FAR_FROM_MARKET = Decimal("0.05")
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,6 +200,31 @@ def load_unprocessed_approved_events(
     return list(session.execute(stmt).all())  # type: ignore[arg-type]
 
 
+def effective_entry(
+    signal: NormalizedSignal,
+    *,
+    entry_type: str | None,
+    entry_value: Decimal | None,
+) -> tuple[str, list[Decimal]]:
+    """The entry the user actually approved: their override if any, else the signal's own.
+
+    A `MARKET` override carries no price; a `LIMIT` override carries exactly one.
+    """
+    if entry_type == "MARKET":
+        return "MARKET", []
+    if entry_type == "LIMIT" and entry_value is not None:
+        return "LIMIT", [entry_value]
+    assert signal.entry_type is not None
+    return signal.entry_type, [Decimal(str(v)) for v in (signal.entry_values or [])]
+
+
+def _config_with_size(config: RiskConfig, position_size_pct: Decimal | None) -> RiskConfig:
+    """Per-trade size override (fraction of equity as margin); `None` keeps the default."""
+    if position_size_pct is None:
+        return config
+    return replace(config, position_size_pct=position_size_pct)
+
+
 def _create_trade_intent(
     session: Session,
     event: SignalDecisionEvent,
@@ -213,6 +242,15 @@ def _create_trade_intent(
     """
     intent_id = _intent_id_for_event(event.event_id)
     take_profits = event.approved_take_profits if event.approved_take_profits is not None else []
+    entry_type, entry_values = (
+        effective_entry(
+            signal,
+            entry_type=event.approved_entry_type,
+            entry_value=event.approved_entry_value,
+        )
+        if signal.entry_type is not None
+        else (None, [])
+    )
     session.execute(
         pg_insert(TradeIntentRow)
         .values(
@@ -222,8 +260,8 @@ def _create_trade_intent(
             channel_id=signal.channel_id,
             symbol=signal.symbol,
             side=signal.side,
-            entry_type=signal.entry_type,
-            entry_values=signal.entry_values,
+            entry_type=entry_type,
+            entry_values=[str(value) for value in entry_values],
             stop_value=event.approved_stop_value,
             take_profits=take_profits,
             status=status,
@@ -324,8 +362,12 @@ def preview_trade_intent(
     market_data_client: Any,
     now: datetime,
     daily_realized_loss_pct: Decimal = Decimal(0),
+    draft: DraftValues | None = None,
 ) -> RiskEvaluation:
     """Read-only preview for the Control Bot's pre-approval notification.
+
+    `draft` carries the user's pending edits (entry, size, stop); without it the signal's own
+    values are previewed.
 
     Computes exactly what `run_risk_evaluation` would compute for this
     signal if it were approved right now, using a clean-slate `AccountState`
@@ -357,8 +399,13 @@ def preview_trade_intent(
         )
         market_price = None
 
+    preview_entry_type, preview_entry_values = effective_entry(
+        signal,
+        entry_type=draft.entry_type if draft is not None else None,
+        entry_value=draft.entry_value if draft is not None else None,
+    )
     reference_price: Decimal | None = None
-    if signal.entry_type == "MARKET" and market_price is not None:
+    if preview_entry_type == "MARKET" and market_price is not None:
         try:
             reference_price = fetch_reference_price(
                 market_data_client, signal.symbol, at=raw_message.source_date
@@ -372,15 +419,15 @@ def preview_trade_intent(
     intent_input = TradeIntentInput(
         symbol=signal.symbol,
         side=signal.side,
-        entry_type=signal.entry_type,
-        entry_values=[Decimal(v) for v in (signal.entry_values or [])],
-        stop_value=signal.stop_value,
+        entry_type=preview_entry_type,
+        entry_values=preview_entry_values,
+        stop_value=draft.stop_value if draft is not None else signal.stop_value,
         signal_source_date=raw_message.source_date,
         signal_received_at=raw_message.received_at,
     )
-    return evaluate_trade_intent(
+    evaluation = evaluate_trade_intent(
         intent_input,
-        config=config,
+        config=_config_with_size(config, draft.position_size_pct if draft is not None else None),
         account=default_starting_account_state(
             config, daily_realized_loss_pct=daily_realized_loss_pct
         ),
@@ -388,6 +435,19 @@ def preview_trade_intent(
         reference_price=reference_price,
         now=now,
     )
+    # A limit price far from the market is most often a typo: surface it, never block on it.
+    if (
+        preview_entry_type == "LIMIT"
+        and preview_entry_values
+        and market_price is not None
+        and market_price > 0
+        and abs(preview_entry_values[0] - market_price) / market_price > _ENTRY_FAR_FROM_MARKET
+    ):
+        evaluation = replace(
+            evaluation,
+            advisory_codes=[*evaluation.advisory_codes, ADVISORY_ENTRY_FAR_FROM_MARKET],
+        )
+    return evaluation
 
 
 def run_risk_evaluation(
@@ -478,8 +538,13 @@ def run_risk_evaluation(
                 )
                 market_price = None
 
+            approved_entry_type, entry_values = effective_entry(
+                signal,
+                entry_type=event.approved_entry_type,
+                entry_value=event.approved_entry_value,
+            )
             reference_price: Decimal | None = None
-            if signal.entry_type == "MARKET":
+            if approved_entry_type == "MARKET":
                 try:
                     reference_price = fetch_reference_price(
                         market_data_client, signal.symbol, at=raw_message.source_date
@@ -490,12 +555,11 @@ def run_risk_evaluation(
                         extra={"context": {"symbol": signal.symbol, "intent_id": intent_id}},
                     )
 
-            entry_values = [Decimal(v) for v in (signal.entry_values or [])]
             stop_value = event.approved_stop_value
             intent_input = TradeIntentInput(
                 symbol=signal.symbol,
                 side=signal.side,
-                entry_type=signal.entry_type,
+                entry_type=approved_entry_type,
                 entry_values=entry_values,
                 stop_value=stop_value,
                 signal_source_date=raw_message.source_date,
@@ -503,7 +567,7 @@ def run_risk_evaluation(
             )
             evaluation = evaluate_trade_intent(
                 intent_input,
-                config=config,
+                config=_config_with_size(config, event.approved_position_size_pct),
                 account=account,
                 market_price=market_price,
                 reference_price=reference_price,

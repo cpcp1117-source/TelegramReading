@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Literal, cast
@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
+from telegram_trader.draft_edit import EntryEdit
 from telegram_trader.models import (
     NormalizedSignal,
     SignalDecisionEdit,
@@ -20,13 +21,23 @@ from telegram_trader.models import (
 
 DecisionAction = Literal["APPROVE", "REJECT"]
 DecisionOutcome = Literal["APPROVED", "REJECTED", "REJECTED_STALE", "REJECTED_EXPIRED"]
-EditableField = Literal["STOP", "TAKE_PROFIT"]
+EditableField = Literal["STOP", "TAKE_PROFIT", "ENTRY", "SIZE"]
 
 
 @dataclass(frozen=True, slots=True)
 class DraftValues:
+    """What the user is about to approve.
+
+    `entry_type`/`entry_value` are `None` while the signal's own entry is untouched (a `MARKET`
+    override carries no value). `position_size_pct` is a fraction of equity used as margin; `None`
+    means the configured default.
+    """
+
     stop_value: Decimal | None
     take_profits: list[Decimal]
+    entry_type: str | None = None
+    entry_value: Decimal | None = None
+    position_size_pct: Decimal | None = None
 
 
 def request_id_for_signal_row(signal_row_id: str) -> str:
@@ -165,6 +176,15 @@ def find_request_by_nonce(session: Session, nonce: str) -> SignalDecisionRequest
     return session.scalar(select(SignalDecisionRequest).where(SignalDecisionRequest.nonce == nonce))
 
 
+def draft_from_signal(signal: NormalizedSignal) -> DraftValues:
+    """The untouched draft: the signal's own stop/targets and its producer's suggested size."""
+    return DraftValues(
+        stop_value=signal.stop_value,
+        take_profits=[Decimal(str(value)) for value in signal.take_profits],
+        position_size_pct=signal.suggested_size_pct,
+    )
+
+
 def load_current_draft(session: Session, request: SignalDecisionRequest) -> DraftValues:
     """The latest edit for this request, or the original signal's own values if never edited.
 
@@ -182,14 +202,14 @@ def load_current_draft(session: Session, request: SignalDecisionRequest) -> Draf
         return DraftValues(
             stop_value=latest_edit.stop_value,
             take_profits=[Decimal(str(value)) for value in latest_edit.take_profits],
+            entry_type=latest_edit.entry_type,
+            entry_value=latest_edit.entry_value,
+            position_size_pct=latest_edit.position_size_pct,
         )
     signal = session.get(NormalizedSignal, request.signal_row_id)
     if signal is None:
         return DraftValues(stop_value=None, take_profits=[])
-    return DraftValues(
-        stop_value=signal.stop_value,
-        take_profits=[Decimal(str(value)) for value in signal.take_profits],
-    )
+    return draft_from_signal(signal)
 
 
 def create_edit(
@@ -197,25 +217,29 @@ def create_edit(
     request: SignalDecisionRequest,
     *,
     field: EditableField,
-    value: Decimal | list[Decimal],
+    value: Decimal | list[Decimal] | EntryEdit,
 ) -> DraftValues:
-    """Append one full-draft-snapshot edit row, carrying the untouched field forward.
+    """Append one full-draft-snapshot edit row, carrying the untouched fields forward.
 
     Editing `TAKE_PROFIT` replaces the whole take-profit list with the
     single new value the user typed -- matching the confirmed "reply with
-    one new number" interaction, not a multi-value syntax.
+    one new number" interaction, not a multi-value syntax. `ENTRY` takes an `EntryEdit`
+    (a limit price, or market) and `SIZE` a fraction of equity.
     """
     current = load_current_draft(session, request)
-    new_stop_value: Decimal | None
-    new_take_profits: list[Decimal]
+    draft = current
     if field == "STOP":
         assert isinstance(value, Decimal)
-        new_stop_value = value
-        new_take_profits = current.take_profits
-    else:
+        draft = replace(current, stop_value=value)
+    elif field == "TAKE_PROFIT":
         assert isinstance(value, list)
-        new_stop_value = current.stop_value
-        new_take_profits = value
+        draft = replace(current, take_profits=value)
+    elif field == "ENTRY":
+        assert isinstance(value, EntryEdit)
+        draft = replace(current, entry_type=value.kind, entry_value=value.price)
+    else:
+        assert isinstance(value, Decimal)
+        draft = replace(current, position_size_pct=value)
 
     next_revision = (
         session.scalar(
@@ -230,11 +254,14 @@ def create_edit(
             edit_id=hashlib.sha256(f"{request.request_id}:{next_revision}".encode()).hexdigest(),
             request_id=request.request_id,
             revision=next_revision,
-            stop_value=new_stop_value,
-            take_profits=[str(tp) for tp in new_take_profits],
+            stop_value=draft.stop_value,
+            take_profits=[str(tp) for tp in draft.take_profits],
+            entry_type=draft.entry_type,
+            entry_value=draft.entry_value,
+            position_size_pct=draft.position_size_pct,
         )
     )
-    return DraftValues(stop_value=new_stop_value, take_profits=new_take_profits)
+    return draft
 
 
 def _is_current_revision(session: Session, request: SignalDecisionRequest) -> bool:
@@ -312,6 +339,9 @@ def record_decision(
             outcome=outcome,
             approved_stop_value=draft.stop_value,
             approved_take_profits=[str(tp) for tp in draft.take_profits],
+            approved_entry_type=draft.entry_type,
+            approved_entry_value=draft.entry_value,
+            approved_position_size_pct=draft.position_size_pct,
             decided_at=moment,
         )
         .on_conflict_do_nothing(index_elements=["event_id"])

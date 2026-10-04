@@ -22,8 +22,19 @@ from telegram_trader.daily_loss import (
     record_pause_decision,
 )
 from telegram_trader.db import create_db_engine, create_session_factory
+from telegram_trader.draft_edit import (
+    DraftEditError,
+    EntryEdit,
+    parse_entry_input,
+    parse_size_input,
+)
 from telegram_trader.logging_config import configure_logging
-from telegram_trader.models import NormalizedSignal, OutboxEvent, SignalDecisionRequest
+from telegram_trader.models import (
+    NormalizedSignal,
+    OutboxEvent,
+    SignalDecisionRequest,
+    TelegramMessageVersion,
+)
 from telegram_trader.outbox import (
     OutboxConsumer,
     find_event_by_id_prefix,
@@ -38,6 +49,7 @@ from telegram_trader.signal_decisions import (
     EditableField,
     create_edit,
     create_request,
+    draft_from_signal,
     find_request_by_nonce,
     load_current_draft,
     load_pending_signals,
@@ -85,7 +97,13 @@ _CALLBACK_PREFIX_DAILY_LOSS = "dailyloss"
 _TAIWAN = timezone(timedelta(hours=8))
 _CLOSE_ALL_CONFIRM_WINDOW_SECONDS = 30
 _EDIT_REPLY_WINDOW_SECONDS = 120
-_EDIT_FIELD_LABELS: dict[EditableField, str] = {"STOP": "停損", "TAKE_PROFIT": "停利"}
+_EDIT_FIELD_LABELS: dict[EditableField, str] = {
+    "STOP": "停損",
+    "TAKE_PROFIT": "停利",
+    "ENTRY": "進場價",
+    "SIZE": "倉位比例",
+}
+_EDIT_FIELDS: tuple[str, ...] = ("STOP", "TAKE_PROFIT", "ENTRY", "SIZE")
 
 _NO_EXECUTION_MESSAGE = (
     "✅ 已收到指令，但目前系統沒有可控制的執行元件"
@@ -148,7 +166,7 @@ def decode_close_all_callback(data: bytes) -> str | None:
 
 
 def encode_edit_field_callback(nonce: str, field: EditableField) -> bytes:
-    """`"edit:<nonce>:<STOP|TAKE_PROFIT>"` -- well under the 64-byte cap
+    """`"edit:<nonce>:<STOP|TAKE_PROFIT|ENTRY|SIZE>"` -- well under the 64-byte cap
 
     (worst case ~44 bytes), same nonce-only resolution as the signal
     callback above.
@@ -166,7 +184,7 @@ def decode_edit_field_callback(data: bytes) -> tuple[str, EditableField] | None:
     if len(parts) != 3 or parts[0] != _CALLBACK_PREFIX_EDIT:
         return None
     _, nonce, field = parts
-    if field not in ("STOP", "TAKE_PROFIT"):
+    if field not in _EDIT_FIELDS:
         return None
     return nonce, cast(EditableField, field)
 
@@ -268,8 +286,8 @@ def _format_preview(preview: RiskEvaluation, *, leverage: int) -> str:
 
     Sizing (`quantity`/margin) is independent of stop distance since the
     2026-09-25 flat-sizing change (see risk_engine.py's `RiskConfig.position_size_pct`
-    docstring), so this never changes when the user edits stop/take-profit
-    afterward -- no re-preview is needed on an edit.
+    docstring), but it does depend on the entry price and the per-trade size the user can now
+    edit, so the Control Bot recomputes this preview after every edit.
     """
     quantity = preview.quantity
     entry_price_used = preview.entry_price_used
@@ -297,6 +315,7 @@ def format_signal_notification(
     draft: DraftValues | None = None,
     preview: RiskEvaluation | None = None,
     leverage: int | None = None,
+    default_size_pct: Decimal | None = None,
 ) -> str:
     """`draft` is only ever passed after an edit -- the initial notification
 
@@ -311,12 +330,32 @@ def format_signal_notification(
         if draft is not None
         else [Decimal(str(value)) for value in signal.take_profits]
     )
+    entry_line = f"entry_type: {signal.entry_type or '-'}"
+    if draft is not None and draft.entry_type == "MARKET":
+        entry_line = "entry_type: MARKET（你改為市價）"
+    elif draft is not None and draft.entry_type == "LIMIT" and draft.entry_value is not None:
+        entry_line = f"entry_type: LIMIT @ {_format_decimal(draft.entry_value)}（你修改）"
+    elif signal.entry_type in ("LIMIT", "RANGE") and signal.entry_values:
+        entry_line += " @ " + ", ".join(
+            _format_decimal(Decimal(str(v))) for v in signal.entry_values
+        )
+    size_pct = draft.position_size_pct if draft is not None else signal.suggested_size_pct
+    if size_pct is not None:
+        size_line: str | None = f"倉位: {_format_decimal(size_pct * 100)}% 資金作保證金" + (
+            "（你修改）"
+            if draft is not None and draft.position_size_pct is not None
+            else "（預設）"
+        )
+    elif default_size_pct is not None:
+        size_line = f"倉位: {_format_decimal(default_size_pct * 100)}% 資金作保證金（系統預設）"
+    else:
+        size_line = None
     lines = [
         "📡 新訊號待核准" if signal.status == "NEW" else "📡 訊號待核准",
         f"symbol: {signal.symbol or '(未知)'}",
         f"side: {signal.side or '(未知)'}",
         f"status: {signal.status}",
-        f"entry_type: {signal.entry_type or '-'}",
+        entry_line,
         f"stop_value: {_format_decimal(stop_value) if stop_value is not None else '-'}",
         (
             "take_profits: "
@@ -324,10 +363,12 @@ def format_signal_notification(
         ),
         f"stop_origin: {signal.stop_origin}",
     ]
+    if size_line is not None:
+        lines.append(size_line)
     if preview is not None and leverage is not None:
         lines.append(_format_preview(preview, leverage=leverage))
     if draft is not None:
-        lines.append("✏️ 停損/停利已依你的修改顯示（尚未核准）。")
+        lines.append("✏️ 已依你的修改顯示（尚未核准）。")
     if signal.status == "NEW":
         lines.append(
             "⚠️ symbol 尚未經市場資料驗證（動態範圍頻道），此核准僅供記錄，不會有任何自動下單。"
@@ -445,6 +486,10 @@ def _signal_decision_buttons(nonce: str) -> list[list[Any]]:
             Button.inline("✏️ 編輯停損", encode_edit_field_callback(nonce, "STOP")),
             Button.inline("✏️ 編輯停利", encode_edit_field_callback(nonce, "TAKE_PROFIT")),
         ],
+        [
+            Button.inline("✏️ 編輯進場價", encode_edit_field_callback(nonce, "ENTRY")),
+            Button.inline("✏️ 編輯倉位", encode_edit_field_callback(nonce, "SIZE")),
+        ],
     ]
 
 
@@ -530,6 +575,7 @@ class ControlBot:
                             market_data_client=self._market_data_client,
                             now=self._clock(),
                             daily_realized_loss_pct=loss_pct,
+                            draft=draft_from_signal(signal),
                         )
                     except Exception:
                         LOGGER.exception(
@@ -541,6 +587,9 @@ class ControlBot:
                     signal,
                     preview=preview,
                     leverage=self._risk_config.leverage if self._risk_config else None,
+                    default_size_pct=(
+                        self._risk_config.position_size_pct if self._risk_config else None
+                    ),
                 )
                 if pause is not None and pause.paused_until is not None:
                     text = (
@@ -713,14 +762,25 @@ class ControlBot:
             await event.reply(_UNKNOWN_COMMAND_MESSAGE)
 
     async def _apply_pending_edit(self, event: Any, pending: _PendingEdit, text: str) -> None:
+        new_value: Decimal | list[Decimal] | EntryEdit
         try:
-            value = Decimal(text.strip())
-            if value <= 0:
-                raise InvalidOperation("value must be positive")
+            if pending.field == "ENTRY":
+                new_value = parse_entry_input(text)
+            elif pending.field == "SIZE":
+                new_value = parse_size_input(text)
+            else:
+                value = Decimal(text.strip())
+                if not value.is_finite() or value <= 0:
+                    raise InvalidOperation("value must be positive")
+                new_value = value if pending.field == "STOP" else [value]
+        except DraftEditError as error:
+            await event.reply(f"⚠️ {error}，或重新點擊編輯按鈕。")
+            return
         except InvalidOperation:
             await event.reply("⚠️ 格式錯誤，請輸入正數數字，或重新點擊編輯按鈕。")
             return
 
+        preview: RiskEvaluation | None = None
         with self._session_factory.begin() as session:
             request = session.get(SignalDecisionRequest, pending.request_id)
             if request is None:
@@ -728,10 +788,38 @@ class ControlBot:
                 draft = None
                 nonce = None
             else:
-                new_value: Decimal | list[Decimal] = value if pending.field == "STOP" else [value]
                 draft = create_edit(session, request, field=pending.field, value=new_value)
                 signal = session.get(NormalizedSignal, request.signal_row_id)
                 nonce = request.nonce
+            raw_message = (
+                session.get(TelegramMessageVersion, signal.raw_message_id)
+                if signal is not None
+                else None
+            )
+            if (
+                signal is not None
+                and raw_message is not None
+                and draft is not None
+                and self._risk_config is not None
+                and self._market_data_client is not None
+            ):
+                try:
+                    preview = preview_trade_intent(
+                        signal,
+                        raw_message,
+                        config=self._risk_config,
+                        market_data_client=self._market_data_client,
+                        now=self._clock(),
+                        daily_realized_loss_pct=daily_loss_pct(
+                            session, self._clock(), self._risk_config.equity_baseline_usdt
+                        ),
+                        draft=draft,
+                    )
+                except Exception:
+                    LOGGER.exception(
+                        "preview after edit failed unexpectedly; showing the draft without one",
+                        extra={"context": {"request_id": pending.request_id}},
+                    )
 
         if signal is None or draft is None or nonce is None:
             await event.reply("⚠️ 找不到這個請求，可能已經過期或被清除，請重新查看 /signals。")
@@ -739,7 +827,16 @@ class ControlBot:
 
         label = _EDIT_FIELD_LABELS[pending.field]
         await event.reply(
-            f"✅ 已更新{label}草稿。\n\n{format_signal_notification(signal, draft=draft)}",
+            f"✅ 已更新{label}草稿。\n\n"
+            + format_signal_notification(
+                signal,
+                draft=draft,
+                preview=preview,
+                leverage=self._risk_config.leverage if self._risk_config else None,
+                default_size_pct=(
+                    self._risk_config.position_size_pct if self._risk_config else None
+                ),
+            ),
             buttons=_signal_decision_buttons(nonce),
         )
 
@@ -797,12 +894,29 @@ class ControlBot:
                 current_value = (
                     _format_decimal(draft.stop_value) if draft.stop_value is not None else None
                 )
-            else:
+                hint = "（純數字）"
+            elif field == "TAKE_PROFIT":
                 current_value = ", ".join(_format_decimal(tp) for tp in draft.take_profits) or None
+                hint = "（純數字）"
+            elif field == "ENTRY":
+                if draft.entry_type == "MARKET":
+                    current_value = "市價"
+                elif draft.entry_value is not None:
+                    current_value = f"限價 {_format_decimal(draft.entry_value)}"
+                else:
+                    current_value = None
+                hint = "（輸入價格 = 限價單；輸入「市價」= 市價單）"
+            else:
+                current_value = (
+                    f"{_format_decimal(draft.position_size_pct * 100)}%"
+                    if draft.position_size_pct is not None
+                    else None
+                )
+                hint = "（資金拿來當保證金的百分比，例如 10 代表 10%，上限 100）"
             await event.answer()
             await event.reply(
-                f"目前{label}為 {current_value if current_value is not None else '-'}。"
-                f"請在 {_EDIT_REPLY_WINDOW_SECONDS} 秒內回覆新的{label}數值（純數字）。"
+                f"目前{label}為 {current_value if current_value is not None else '預設'}。"
+                f"請在 {_EDIT_REPLY_WINDOW_SECONDS} 秒內回覆新的{label}{hint}。"
             )
             return
 

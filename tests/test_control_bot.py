@@ -195,6 +195,58 @@ def test_generate_nonce_is_unique_and_nonempty() -> None:
 # --- formatting ---
 
 
+@pytest.mark.parametrize("field", ["STOP", "TAKE_PROFIT", "ENTRY", "SIZE"])
+def test_edit_callback_round_trips_every_editable_field(field: str) -> None:
+    data = encode_edit_field_callback("n" * 22, field)  # type: ignore[arg-type]
+    assert len(data) <= 64
+    assert decode_edit_field_callback(data) == ("n" * 22, field)
+
+
+def test_edit_callback_rejects_unknown_field() -> None:
+    assert decode_edit_field_callback(b"edit:abc:LEVERAGE") is None
+
+
+def test_format_signal_notification_shows_suggested_size_and_limit_entry() -> None:
+    signal = _signal(
+        status="VALIDATED",
+        entry_type="LIMIT",
+        entry_values=["1.1939"],
+        suggested_size_pct=Decimal("0.10"),
+    )
+
+    text = format_signal_notification(signal)
+
+    assert "entry_type: LIMIT @ 1.1939" in text
+    assert "倉位: 10% 資金作保證金（預設）" in text
+
+
+def test_format_signal_notification_shows_user_edits() -> None:
+    signal = _signal(status="VALIDATED", suggested_size_pct=Decimal("0.10"))
+    draft = DraftValues(
+        stop_value=Decimal("1.25"),
+        take_profits=[],
+        entry_type="LIMIT",
+        entry_value=Decimal("1.19"),
+        position_size_pct=Decimal("0.05"),
+    )
+
+    text = format_signal_notification(signal, draft=draft)
+
+    assert "entry_type: LIMIT @ 1.19（你修改）" in text
+    assert "倉位: 5% 資金作保證金（你修改）" in text
+    assert "已依你的修改顯示" in text
+
+
+def test_format_signal_notification_market_override_and_system_default_size() -> None:
+    signal = _signal(status="VALIDATED", entry_type="LIMIT", entry_values=["95"])
+    draft = DraftValues(stop_value=None, take_profits=[], entry_type="MARKET")
+
+    text = format_signal_notification(signal, draft=draft, default_size_pct=Decimal("0.20"))
+
+    assert "entry_type: MARKET（你改為市價）" in text
+    assert "倉位: 20% 資金作保證金（系統預設）" in text
+
+
 def test_format_signal_notification_flags_dynamic_scope() -> None:
     text = format_signal_notification(_signal(status="NEW"))
     assert "ARB" in text

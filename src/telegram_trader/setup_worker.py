@@ -141,6 +141,7 @@ def run_cycle(
                 session_factory,
                 market_data_client,
                 interval=settings.setup_confirm_interval,
+                suggested_size_pct=settings.setup_default_position_size_pct,
                 clock=clock,
             ),
         )

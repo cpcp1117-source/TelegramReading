@@ -211,6 +211,17 @@ class Settings(BaseSettings):
         gt=0,
         validation_alias=AliasChoices("SETUP_EXPIRY_HOURS", "APP_SETUP_EXPIRY_HOURS"),
     )
+    # Suggested size (fraction of equity used as margin) for drafts built from analysis setups;
+    # smaller than the usual 20% because these are discretionary, conditional ideas. The user can
+    # still change it per trade before approving.
+    setup_default_position_size_pct: Decimal = Field(
+        default=Decimal("0.10"),
+        gt=0,
+        le=1,
+        validation_alias=AliasChoices(
+            "SETUP_DEFAULT_POSITION_SIZE_PCT", "APP_SETUP_DEFAULT_POSITION_SIZE_PCT"
+        ),
+    )
     setup_confirm_interval: Literal["5m", "15m", "30m", "1h"] = Field(
         default="15m",
         validation_alias=AliasChoices("SETUP_CONFIRM_INTERVAL", "APP_SETUP_CONFIRM_INTERVAL"),
