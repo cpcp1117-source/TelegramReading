@@ -12,7 +12,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Any
@@ -28,6 +28,15 @@ from sqlalchemy.orm import Session, sessionmaker
 from telegram_trader.audit import append_audit_event
 from telegram_trader.binance_market_data import BinanceMarketDataClient, fetch_mark_price
 from telegram_trader.config import Settings
+
+# The Control Bot's own definition of "a failure the user must act on" and of the
+# receipt its 「我已處理」 button writes, so the overview counts exactly what it reminds about.
+from telegram_trader.control_bot import (
+    _EXECUTION_FAILURE_EVENT_TYPES as FAILURE_EVENT_TYPES,
+)
+from telegram_trader.control_bot import (
+    _EXECUTION_HANDLED_CONSUMER_NAME as HANDLED_CONSUMER_NAME,
+)
 from telegram_trader.db import create_session_factory, database_is_ready
 from telegram_trader.web_console import records
 from telegram_trader.web_console.auth import (
@@ -42,6 +51,9 @@ from telegram_trader.web_console.records import MarkPriceFetcher, Page
 LOGGER = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
+# Day boundaries for "today" and the daily PnL table. Taiwan has no daylight saving.
+DISPLAY_TZ_NAME = "Asia/Taipei"
+DISPLAY_TZ = timezone(timedelta(hours=8))
 AUDIT_AGGREGATE_TYPE = "web_console_session"
 
 Clock = Callable[[], float]
@@ -123,6 +135,11 @@ def _not_found(value: dict[str, Any] | None) -> dict[str, Any]:
     if value is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="找不到這筆記錄")
     return value
+
+
+def today_start(now: datetime) -> datetime:
+    local = now.astimezone(DISPLAY_TZ)
+    return local.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
 def create_app(
@@ -215,8 +232,49 @@ def create_app(
         return {"username": username}
 
     @app.get("/api/overview")
-    def overview(_username: CurrentUser) -> dict[str, Any]:
-        return {"database": "available" if database_is_ready(engine) else "unavailable"}
+    def overview(_username: CurrentUser, session: Db) -> dict[str, Any]:
+        if not database_is_ready(engine):
+            return {"database": "unavailable"}
+        now = datetime.fromtimestamp(clock(), UTC)
+        counts = records.overview_counts(
+            session,
+            failure_event_types=FAILURE_EVENT_TYPES,
+            handled_consumer=HANDLED_CONSUMER_NAME,
+            today_start=today_start(now),
+            now=now,
+        )
+        return {"database": "available", **counts}
+
+    @app.get("/api/pnl/summary")
+    def pnl_summary(
+        _username: CurrentUser,
+        session: Db,
+        symbol: str | None = None,
+        channel_id: int | None = None,
+        close_reason: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> dict[str, Any]:
+        flt = records.PnlFilter(symbol, channel_id, close_reason, since, until)
+        return {
+            "summary": records.pnl_summary(session, flt),
+            "daily": records.pnl_daily(session, flt, DISPLAY_TZ_NAME),
+        }
+
+    @app.get("/api/pnl")
+    def pnl(
+        _username: CurrentUser,
+        session: Db,
+        symbol: str | None = None,
+        channel_id: int | None = None,
+        close_reason: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        flt = records.PnlFilter(symbol, channel_id, close_reason, since, until)
+        return records.list_pnl(session, flt, Page(limit, offset))
 
     @app.get("/api/channels")
     def channels(_username: CurrentUser, session: Db) -> list[dict[str, Any]]:

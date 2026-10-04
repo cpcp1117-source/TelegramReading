@@ -49,6 +49,7 @@ from telegram_trader.models import (
     OrderLifecycle,
     OutboxDeliveryReceipt,
     OutboxEvent,
+    RealizedPnl,
     RiskConfigSnapshot,
     SignalDecisionEdit,
     SignalDecisionEvent,
@@ -3290,3 +3291,90 @@ def test_retention_cleanup_deletes_risk_rejected_intent_without_orders(engine: E
 
     with factory() as session:
         assert session.get(TradeIntentRow, intent.intent_id) is None
+
+
+# ---------------------------------------------------------------- Realized PnL (0023)
+
+
+def test_position_close_writes_realized_pnl_and_console_sums_it(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    trade_intent = _open_protected_position(factory, 980)
+    page = console_records.Page()
+
+    with factory() as session:
+        before = console_records.overview_counts(
+            session,
+            failure_event_types=frozenset({"execution_protection_failed"}),
+            handled_consumer="control_bot_handled",
+            today_start=RISK_NOW - timedelta(hours=1),
+            now=RISK_NOW,
+        )
+    assert before["open_positions"] == 1
+
+    run_position_monitor(
+        factory, trading_client=_PositionClosedByStopTradingClient(), clock=lambda: RISK_NOW
+    )
+
+    with factory() as session:
+        row = session.get(RealizedPnl, trade_intent.intent_id)
+        assert row is not None
+        assert row.close_reason == "STOP_LOSS"
+        assert row.exit_price == Decimal("94")
+        assert row.quantity == Decimal("1")
+        assert row.realized_pnl == Decimal("-6")
+        assert row.exit_commission == Decimal("0.04")
+        assert row.entry_price is not None
+        assert row.channel_id == 980
+
+        flt = console_records.PnlFilter(since=RISK_NOW - timedelta(days=1))
+        summary = console_records.pnl_summary(session, flt)
+        assert summary["trades"] == 1
+        assert summary["losses"] == 1
+        assert summary["wins"] == 0
+        assert summary["win_rate"] == "0"
+        assert summary["net_pnl"] == "-6.04"
+        assert summary["fees"] == "0.04"
+
+        daily = console_records.pnl_daily(session, flt, "Asia/Taipei")
+        assert daily == [
+            {"day": "2026-09-06", "trades": 1, "net_pnl": "-6.04", "wins": 0, "losses": 1}
+        ]
+        listed = console_records.list_pnl(
+            session, console_records.PnlFilter(close_reason="STOP_LOSS"), page
+        )
+        assert listed["total"] == 1
+        assert listed["items"][0]["net_pnl"] == "-6.04"
+        assert (
+            console_records.list_pnl(
+                session, console_records.PnlFilter(close_reason="TAKE_PROFIT"), page
+            )["total"]
+            == 0
+        )
+
+        after = console_records.overview_counts(
+            session,
+            failure_event_types=frozenset({"execution_protection_retrying"}),
+            handled_consumer="control_bot_handled",
+            today_start=RISK_NOW - timedelta(hours=1),
+            now=RISK_NOW,
+        )
+    assert after["open_positions"] == 0
+    assert after["today"]["net_pnl"] == "-6.04"
+    assert after["recent_closes"][0]["intent_id"] == trade_intent.intent_id
+    # _ProtectionFailsOnceTradingClient's first stop attempt emits a retrying notice.
+    assert after["unhandled_failures"] == 1
+    assert after["unhandled_failure_events"][0]["event_type"] == "execution_protection_retrying"
+
+
+def test_realized_pnl_is_append_only(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    trade_intent = _open_protected_position(factory, 981)
+    run_position_monitor(
+        factory, trading_client=_PositionClosedByStopTradingClient(), clock=lambda: RISK_NOW
+    )
+
+    with pytest.raises(DBAPIError, match="append-only"), factory.begin() as session:
+        session.execute(
+            text("UPDATE realized_pnl SET realized_pnl = 0 WHERE intent_id = :id"),
+            {"id": trade_intent.intent_id},
+        )

@@ -385,3 +385,38 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; margin:
 .timeline .when { color: var(--muted); font-size: 12px; margin-right: 8px; }
 
 .note { color: var(--muted); font-size: 12px; margin: 8px 0 14px; }
+
+/* ---------- overview / pnl ---------- */
+
+.tile.clickable { cursor: pointer; }
+.tile.clickable:hover { border-color: var(--accent); }
+.warn-text { color: #b7791f; }
+
+h2.section {
+  font-size: 15px;
+  margin: 26px 0 10px;
+}
+
+.chart { position: relative; padding: 12px 14px; }
+.chart-svg { width: 100%; height: auto; display: block; }
+.chart-svg .grid { stroke: var(--border); stroke-width: 1; }
+.chart-svg .zero { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; }
+.chart-svg .axis { fill: var(--muted); font-size: 11px; }
+.chart-svg .series { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; }
+.chart-svg .crosshair { stroke: var(--muted); stroke-width: 1; }
+.chart-svg .series-dot { fill: var(--accent); stroke: var(--surface); stroke-width: 2; }
+
+.tooltip {
+  position: absolute;
+  pointer-events: none;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--text);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.15);
+  min-width: 170px;
+}
+
+.tooltip .tip-title { font-weight: 600; margin-bottom: 4px; }

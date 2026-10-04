@@ -13,7 +13,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import ColumnElement, Select, and_, func, select
+from sqlalchemy import ColumnElement, Select, and_, func, literal, select
 from sqlalchemy.orm import Session, aliased
 
 from telegram_trader.models import (
@@ -22,7 +22,10 @@ from telegram_trader.models import (
     ExchangeOrder,
     NormalizedSignal,
     OrderLifecycle,
+    OutboxDeliveryReceipt,
+    OutboxEvent,
     ProtectionOrder,
+    RealizedPnl,
     RiskDecision,
     SignalDecisionEdit,
     SignalDecisionEvent,
@@ -669,4 +672,194 @@ def list_audit(session: Session, flt: AuditFilter, page: Page) -> dict[str, Any]
             for (event,) in rows
         ],
         "total": total,
+    }
+
+
+# ---------------------------------------------------------------- realized PnL
+
+
+@dataclass(frozen=True)
+class PnlFilter:
+    symbol: str | None = None
+    channel_id: int | None = None
+    close_reason: str | None = None
+    since: datetime | None = None
+    until: datetime | None = None
+
+
+def _net_pnl() -> Any:
+    """Gross realized PnL minus the closing fee; NULL when the fills were unavailable."""
+    return RealizedPnl.realized_pnl - func.coalesce(RealizedPnl.exit_commission, 0)
+
+
+def _pnl_conditions(flt: PnlFilter) -> list[ColumnElement[bool]]:
+    conditions: list[ColumnElement[bool]] = []
+    if flt.symbol:
+        conditions.append(RealizedPnl.symbol.ilike(f"%{flt.symbol.strip()}%"))
+    if flt.channel_id is not None:
+        conditions.append(RealizedPnl.channel_id == flt.channel_id)
+    if flt.close_reason:
+        conditions.append(RealizedPnl.close_reason == flt.close_reason)
+    if flt.since is not None:
+        conditions.append(RealizedPnl.closed_at >= flt.since)
+    if flt.until is not None:
+        conditions.append(RealizedPnl.closed_at < flt.until)
+    return conditions
+
+
+def pnl_summary(session: Session, flt: PnlFilter) -> dict[str, Any]:
+    net = _net_pnl()
+    row = session.execute(
+        select(
+            func.count(),
+            func.count(RealizedPnl.realized_pnl),
+            func.count().filter(net > 0),
+            func.count().filter(net < 0),
+            func.sum(RealizedPnl.realized_pnl),
+            func.sum(RealizedPnl.exit_commission),
+            func.sum(net),
+            func.max(net),
+            func.min(net),
+        ).where(*_pnl_conditions(flt))
+    ).one()
+    trades, with_pnl, wins, losses, gross, fees, net_total, best, worst = row
+    return {
+        "trades": trades,
+        "trades_with_pnl": with_pnl,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": to_json((Decimal(wins) / Decimal(with_pnl)).quantize(Decimal("0.0001")))
+        if with_pnl
+        else None,
+        "gross_pnl": to_json(gross),
+        "fees": to_json(fees),
+        "net_pnl": to_json(net_total),
+        "best": to_json(best),
+        "worst": to_json(worst),
+    }
+
+
+def pnl_daily(session: Session, flt: PnlFilter, tz: str) -> list[dict[str, Any]]:
+    """Net PnL per calendar day in `tz` (the caller validates it as an IANA zone name)."""
+    day = func.date(func.timezone(literal(tz), RealizedPnl.closed_at)).label("day")
+    net = _net_pnl()
+    stmt = (
+        select(
+            day,
+            func.count(),
+            func.sum(net),
+            func.count().filter(net > 0),
+            func.count().filter(net < 0),
+        )
+        .where(*_pnl_conditions(flt))
+        .group_by(day)
+        .order_by(day)
+    )
+    return [
+        {
+            "day": d.isoformat(),
+            "trades": trades,
+            "net_pnl": to_json(total),
+            "wins": wins,
+            "losses": losses,
+        }
+        for d, trades, total, wins, losses in session.execute(stmt)
+    ]
+
+
+def list_pnl(session: Session, flt: PnlFilter, page: Page) -> dict[str, Any]:
+    stmt = (
+        select(RealizedPnl, _net_pnl().label("net_pnl"))
+        .where(*_pnl_conditions(flt))
+        .order_by(RealizedPnl.closed_at.desc(), RealizedPnl.intent_id)
+    )
+    rows, total = _paged(session, stmt, page)
+    labels = channel_labels(session)
+    items = []
+    for row, net in rows:
+        item = _row(
+            row,
+            (
+                "intent_id",
+                "symbol",
+                "side",
+                "close_reason",
+                "quantity",
+                "entry_price",
+                "exit_price",
+                "realized_pnl",
+                "exit_commission",
+                "opened_at",
+                "closed_at",
+            ),
+        )
+        item["channel"] = _label(labels, row.channel_id, None)
+        item["net_pnl"] = to_json(net)
+        items.append(item)
+    return {"items": items, "total": total}
+
+
+# ---------------------------------------------------------------- overview
+
+
+def overview_counts(
+    session: Session,
+    *,
+    failure_event_types: frozenset[str],
+    handled_consumer: str,
+    today_start: datetime,
+    now: datetime,
+) -> dict[str, Any]:
+    latest, lifecycle, join_on = _latest_lifecycle()
+    open_positions = session.scalar(
+        select(func.count())
+        .select_from(lifecycle)
+        .join(latest, join_on)
+        .where(lifecycle.state.in_(OPEN_POSITION_STATES))
+    )
+    decided = select(SignalDecisionEvent.request_id)
+    awaiting_decision = session.scalar(
+        select(func.count())
+        .select_from(SignalDecisionRequest)
+        .where(
+            SignalDecisionRequest.request_id.not_in(decided),
+            SignalDecisionRequest.expires_at > now,
+        )
+    )
+    handled = select(OutboxDeliveryReceipt.event_id).where(
+        OutboxDeliveryReceipt.consumer_name == handled_consumer
+    )
+    unhandled = list(
+        session.scalars(
+            select(OutboxEvent)
+            .where(
+                OutboxEvent.event_type.in_(tuple(failure_event_types)),
+                OutboxEvent.event_id.not_in(handled),
+            )
+            .order_by(OutboxEvent.recorded_at.desc())
+            .limit(20)
+        )
+    )
+    unhandled_total = session.scalar(
+        select(func.count())
+        .select_from(OutboxEvent)
+        .where(
+            OutboxEvent.event_type.in_(tuple(failure_event_types)),
+            OutboxEvent.event_id.not_in(handled),
+        )
+    )
+    today = pnl_summary(session, PnlFilter(since=today_start))
+    overall = pnl_summary(session, PnlFilter())
+    recent_closes = list_pnl(session, PnlFilter(), Page(limit=5))["items"]
+    return {
+        "open_positions": open_positions or 0,
+        "awaiting_decision": awaiting_decision or 0,
+        "unhandled_failures": unhandled_total or 0,
+        "unhandled_failure_events": [
+            _row(event, ("event_id", "event_type", "aggregate_id", "payload", "recorded_at"))
+            for event in unhandled
+        ],
+        "today": today,
+        "overall": overall,
+        "recent_closes": recent_closes,
     }

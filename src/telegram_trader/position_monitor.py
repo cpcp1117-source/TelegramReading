@@ -28,7 +28,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from telegram_trader.execution_gateway import _notify, _write_lifecycle, close_side_for
-from telegram_trader.models import ExchangeOrder, OrderLifecycle
+from telegram_trader.models import ExchangeOrder, OrderLifecycle, RealizedPnl, TradeIntent
 
 LOGGER = logging.getLogger(__name__)
 
@@ -149,6 +149,44 @@ def _summarize_closing_fills(
     }
 
 
+def _decimal_or_none(value: str | None) -> Decimal | None:
+    return Decimal(value) if value else None
+
+
+def _record_realized_pnl(
+    session: Session,
+    position: OpenPosition,
+    close_reason: str,
+    fills: dict[str, str | None],
+    now: datetime,
+) -> None:
+    """The close as a queryable row (migration 0023), same transaction as the CLOSED state."""
+    channel_id = session.scalar(
+        select(TradeIntent.channel_id).where(TradeIntent.intent_id == position.intent_id)
+    )
+    entry_price = session.scalar(
+        select(ExchangeOrder.avg_fill_price).where(
+            ExchangeOrder.intent_id == position.intent_id, ExchangeOrder.purpose == "ENTRY"
+        )
+    )
+    session.add(
+        RealizedPnl(
+            intent_id=position.intent_id,
+            channel_id=channel_id,
+            symbol=position.symbol,
+            side=position.side,
+            close_reason=close_reason,
+            quantity=_decimal_or_none(fills.get("closed_quantity")),
+            entry_price=entry_price,
+            exit_price=_decimal_or_none(fills.get("exit_price")),
+            realized_pnl=_decimal_or_none(fills.get("realized_pnl")),
+            exit_commission=_decimal_or_none(fills.get("exit_commission")),
+            opened_at=position.filled_at,
+            closed_at=now,
+        )
+    )
+
+
 def _check_one(
     session_factory: sessionmaker[Session],
     position: OpenPosition,
@@ -244,6 +282,7 @@ def _check_one(
                 .where(ExchangeOrder.client_order_id == client_order_id)
                 .values(status=status, last_checked_at=now)
             )
+        _record_realized_pnl(session, position, close_reason, fills, now)
         _notify(
             session,
             intent_id=position.intent_id,

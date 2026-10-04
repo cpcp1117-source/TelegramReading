@@ -9,6 +9,7 @@ from sqlalchemy import create_engine
 
 import telegram_trader.web_console.app as app_module
 from telegram_trader.config import Settings
+from telegram_trader.web_console import records as console_records
 from telegram_trader.web_console.app import create_app
 from telegram_trader.web_console.auth import (
     SESSION_COOKIE_NAME,
@@ -80,6 +81,9 @@ def audit_events(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
 
     monkeypatch.setattr(app_module, "_record_audit", fake_record)
     monkeypatch.setattr(app_module, "database_is_ready", lambda _engine: True)
+    monkeypatch.setattr(
+        console_records, "overview_counts", lambda _session, **_kwargs: {"open_positions": 0}
+    )
     return recorded
 
 
@@ -125,7 +129,7 @@ def test_login_success_sets_cookie_and_audits(
     assert "HttpOnly" in cookie
     assert "SameSite=strict" in cookie
     assert client.get("/api/me").json() == {"username": "admin"}
-    assert client.get("/api/overview").json() == {"database": "available"}
+    assert client.get("/api/overview").json()["database"] == "available"
     assert client.get("/", follow_redirects=False).status_code == 200
     assert client.get("/login", follow_redirects=False).status_code == 303
     assert audit_events == [("web_console_login_succeeded", "admin")]
@@ -329,3 +333,70 @@ def test_testnet_mark_price_fetcher_returns_none_on_error(
     fetch = app_module.testnet_mark_price_fetcher(_console_settings())
     assert fetch("BTCUSDT") == Decimal("65000.5")
     assert fetch("NOPE") is None
+
+
+def test_overview_passes_taipei_day_start_and_failure_definition(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, clock: _Clock
+) -> None:
+    from datetime import UTC, datetime
+
+    seen: dict[str, Any] = {}
+
+    def fake_counts(_session: Any, **kwargs: Any) -> dict[str, Any]:
+        seen.update(kwargs)
+        return {"open_positions": 2}
+
+    monkeypatch.setattr(console_records, "overview_counts", fake_counts)
+    # 2026-10-04 17:30 UTC is already 2026-10-05 01:30 in Taipei.
+    clock.now = datetime(2026, 10, 4, 17, 30, tzinfo=UTC).timestamp()
+    _login(client)
+
+    body = client.get("/api/overview").json()
+
+    assert body == {"database": "available", "open_positions": 2}
+    assert seen["today_start"] == datetime(2026, 10, 4, 16, 0, tzinfo=UTC)
+    assert "execution_protection_failed" in seen["failure_event_types"]
+    assert seen["handled_consumer"] == "control_bot_handled"
+
+
+def test_overview_reports_database_down(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _login(client)
+    monkeypatch.setattr(app_module, "database_is_ready", lambda _engine: False)
+    assert client.get("/api/overview").json() == {"database": "unavailable"}
+
+
+def test_pnl_routes_pass_filters(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    from telegram_trader.web_console import records
+
+    seen: dict[str, Any] = {}
+
+    def fake_summary(_session: Any, flt: Any) -> dict[str, Any]:
+        seen["summary"] = flt
+        return {"trades": 0}
+
+    def fake_daily(_session: Any, flt: Any, tz: str) -> list[Any]:
+        seen["tz"] = tz
+        return []
+
+    def fake_list(_session: Any, flt: Any, page: Any) -> dict[str, Any]:
+        seen["list"] = (flt, page)
+        return {"items": [], "total": 0}
+
+    monkeypatch.setattr(records, "pnl_summary", fake_summary)
+    monkeypatch.setattr(records, "pnl_daily", fake_daily)
+    monkeypatch.setattr(records, "list_pnl", fake_list)
+    assert client.get("/api/pnl").status_code == 401
+    assert client.get("/api/pnl/summary").status_code == 401
+    _login(client)
+
+    summary = client.get("/api/pnl/summary?close_reason=STOP_LOSS&since=2026-10-01T00:00:00Z")
+    assert summary.json() == {"summary": {"trades": 0}, "daily": []}
+    assert seen["summary"].close_reason == "STOP_LOSS"
+    assert seen["summary"].since is not None
+    assert seen["tz"] == "Asia/Taipei"
+
+    client.get("/api/pnl?symbol=BTC&channel_id=7&limit=5")
+    flt, page = seen["list"]
+    assert (flt.symbol, flt.channel_id, page.limit) == ("BTC", 7, 5)

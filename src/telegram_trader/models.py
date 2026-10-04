@@ -1148,6 +1148,43 @@ class PositionSnapshot(Base):
     )
 
 
+class RealizedPnl(Base):
+    """One closed position's realized result (migration 0023), written by `position_monitor`.
+
+    `realized_pnl` is Binance's gross `realizedPnl` over the closing fills and
+    `exit_commission` their fee; both are NULL when the fills could not be loaded.
+    Append-only (BEFORE UPDATE trigger).
+    """
+
+    __tablename__ = "realized_pnl"
+    __table_args__ = (
+        CheckConstraint("side IN ('LONG', 'SHORT')", name="ck_realized_pnl_side_valid"),
+        CheckConstraint(
+            "close_reason IN ('STOP_LOSS', 'TAKE_PROFIT', 'OTHER')",
+            name="ck_realized_pnl_close_reason_valid",
+        ),
+        Index("ix_realized_pnl_closed_at", "closed_at"),
+    )
+
+    intent_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("trade_intent.intent_id"), primary_key=True
+    )
+    channel_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    symbol: Mapped[str] = mapped_column(String(30), nullable=False)
+    side: Mapped[str] = mapped_column(String(10), nullable=False)
+    close_reason: Mapped[str] = mapped_column(String(20), nullable=False)
+    quantity: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    entry_price: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    exit_price: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    realized_pnl: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    exit_commission: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    closed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class AnalysisSetup(Base):
     """One monitorable trade idea the AI extracted from an ANALYSIS-channel message.
 

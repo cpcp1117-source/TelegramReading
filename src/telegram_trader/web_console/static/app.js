@@ -11,7 +11,7 @@ const PAGES = {
   signals: { title: "訊號與核准記錄", render: renderSignals },
   orders: { title: "開單記錄", render: renderOrders },
   positions: { title: "持倉資料", render: renderPositions },
-  pnl: { title: "損益記錄" },
+  pnl: { title: "損益記錄", render: renderPnl },
   theses: { title: "分析草稿", render: renderTheses },
   audit: { title: "稽核日誌", render: renderAudit },
 };
@@ -82,6 +82,7 @@ const LABELS = {
     web_console_login_failed: "管理介面登入失敗",
     web_console_logout: "管理介面登出",
   },
+  closeReason: { STOP_LOSS: "停損", TAKE_PROFIT: "停利", OTHER: "其他（手動 / 強平）" },
   reason: {
     STALE_MARKET_DATA: "行情資料過舊",
     SIGNAL_NOT_VALIDATED: "訊號未通過驗證",
@@ -345,10 +346,60 @@ async function channelOptions() {
 
 // ---------------------------------------------------------------- overview
 
+function linkTile(labelText, value, tone, hash) {
+  const node = tile(labelText, value, tone);
+  node.classList.add("clickable");
+  node.addEventListener("click", () => {
+    window.location.hash = hash;
+  });
+  return node;
+}
+
+function pnlTone(value) {
+  if (value === null || value === undefined) return "";
+  const n = Number(value);
+  return n > 0 ? "ok" : n < 0 ? "bad" : "";
+}
+
+function signed(value) {
+  if (value === null || value === undefined) return "—";
+  return Number(value) > 0 ? `+${value}` : String(value);
+}
+
 async function renderOverview(container) {
   const data = await api("/api/overview");
-  const dbOk = data.database === "available";
-  container.append(el("div", { class: "tiles" }, [tile("資料庫", dbOk ? "正常" : "無法連線", dbOk ? "ok" : "bad")]));
+  if (data.database !== "available") {
+    container.append(el("div", { class: "tiles" }, [tile("資料庫", "無法連線", "bad")]));
+    return;
+  }
+  container.append(
+    el("div", { class: "tiles" }, [
+      linkTile("目前持倉", data.open_positions, "", "#positions"),
+      linkTile("等待核准的訊號", data.awaiting_decision, data.awaiting_decision ? "warn-text" : "", "#signals"),
+      tile("未處理的失敗通知", data.unhandled_failures, data.unhandled_failures ? "bad" : "ok"),
+      linkTile("今日淨損益 (USDT)", signed(data.today.net_pnl ?? "0"), pnlTone(data.today.net_pnl), "#pnl"),
+      linkTile("累計淨損益 (USDT)", signed(data.overall.net_pnl ?? "0"), pnlTone(data.overall.net_pnl), "#pnl"),
+    ]),
+  );
+
+  container.append(
+    el("h2", { class: "section" }, "未處理的失敗通知"),
+    el("p", { class: "note" }, "在 Telegram 按「我已處理」後就會從這裡消失。最多列出最近 20 筆。"),
+    table([
+      { title: "時間", render: (r) => fmtTime(r.recorded_at) },
+      { title: "事件", render: (r) => label("eventType", r.event_type) },
+      { title: "幣種", render: (r) => fmtNum(r.payload.symbol) },
+      { title: "說明", render: (r) => fmtNum(r.payload.error || r.payload.reason || r.payload.orders || ""), wrap: true },
+    ], data.unhandled_failure_events, (row) => {
+      if (row.event_type.startsWith("execution_worker")) {
+        openDrawer(label("eventType", row.event_type), () => [el("pre", { class: "json" }, JSON.stringify(row.payload, null, 2))]);
+      } else {
+        openDrawer("開單明細", () => orderDrawer(row.aggregate_id));
+      }
+    }, "沒有待處理的失敗通知"),
+    el("h2", { class: "section" }, "最近平倉"),
+    pnlTable(data.recent_closes, "還沒有平倉記錄"),
+  );
 }
 
 // ---------------------------------------------------------------- signals
@@ -557,6 +608,193 @@ async function renderPositions(container) {
     { title: "停利", render: (r) => el("span", {}, [fmtNum(r.take_profit_price), " ", r.take_profit_state ? badge("orderState", r.take_profit_state) : ""]) },
     { title: "狀態", render: (r) => badge("state", r.state) },
   ], rows, (row) => openDrawer(`開單 ${row.symbol}`, () => orderDrawer(row.intent_id)), "目前沒有持倉"));
+}
+
+// ---------------------------------------------------------------- pnl
+
+function pnlTable(rows, emptyText) {
+  return table([
+    { title: "平倉時間", render: (r) => fmtTime(r.closed_at) },
+    { title: "頻道", key: "channel" },
+    { title: "幣種", key: "symbol" },
+    { title: "方向", render: (r) => sideCell(r.side) },
+    { title: "數量", key: "quantity", num: true },
+    { title: "進場價", key: "entry_price", num: true },
+    { title: "出場價", key: "exit_price", num: true },
+    { title: "平倉原因", render: (r) => label("closeReason", r.close_reason) },
+    { title: "已實現損益", render: (r) => pnlCell(r.realized_pnl), num: true },
+    { title: "平倉手續費", key: "exit_commission", num: true },
+    { title: "淨損益", render: (r) => pnlCell(r.net_pnl), num: true },
+  ], rows, (row) => openDrawer(`開單 ${row.symbol}`, () => orderDrawer(row.intent_id)), emptyText);
+}
+
+function rangeParams(range, from, to) {
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  if (range === "today") return { since: start.toISOString() };
+  if (range === "7d" || range === "30d") {
+    start.setDate(start.getDate() - (range === "7d" ? 6 : 29));
+    return { since: start.toISOString() };
+  }
+  if (range === "custom") {
+    const params = {};
+    if (from) params.since = new Date(`${from}T00:00:00`).toISOString();
+    if (to) {
+      const end = new Date(`${to}T00:00:00`);
+      end.setDate(end.getDate() + 1);
+      params.until = end.toISOString();
+    }
+    return params;
+  }
+  return {};
+}
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+function svg(tag, attrs = {}) {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
+  return node;
+}
+
+// Cumulative net PnL by day. One series, so no legend: the section heading names it.
+function cumulativeChart(daily) {
+  const wrap = el("div", { class: "card chart" });
+  if (daily.length < 2) {
+    wrap.append(el("div", { class: "empty" }, daily.length ? "只有一天的資料，累計曲線需要兩天以上" : "這段期間沒有平倉"));
+    return wrap;
+  }
+  let running = 0;
+  const points = daily.map((d) => {
+    running += Number(d.net_pnl || 0);
+    return { day: d.day, net: Number(d.net_pnl || 0), cum: running, trades: d.trades };
+  });
+  const width = 760;
+  const height = 240;
+  const pad = { top: 16, right: 16, bottom: 28, left: 64 };
+  const values = points.map((p) => p.cum).concat(0);
+  let min = Math.min(...values);
+  let max = Math.max(...values);
+  if (min === max) {
+    min -= 1;
+    max += 1;
+  }
+  const x = (i) => pad.left + (i / (points.length - 1)) * (width - pad.left - pad.right);
+  const y = (v) => pad.top + (1 - (v - min) / (max - min)) * (height - pad.top - pad.bottom);
+
+  const chart = svg("svg", { viewBox: `0 0 ${width} ${height}`, class: "chart-svg", role: "img", "aria-label": "累計淨損益走勢" });
+  for (const t of [min, (min + max) / 2, max]) {
+    chart.append(svg("line", { x1: pad.left, x2: width - pad.right, y1: y(t), y2: y(t), class: "grid" }));
+    const text = svg("text", { x: pad.left - 8, y: y(t) + 4, class: "axis", "text-anchor": "end" });
+    text.textContent = t.toFixed(2);
+    chart.append(text);
+  }
+  chart.append(svg("line", { x1: pad.left, x2: width - pad.right, y1: y(0), y2: y(0), class: "zero" }));
+  for (const i of [0, points.length - 1]) {
+    const text = svg("text", { x: x(i), y: height - 8, class: "axis", "text-anchor": i === 0 ? "start" : "end" });
+    text.textContent = points[i].day;
+    chart.append(text);
+  }
+  chart.append(svg("path", { d: points.map((p, i) => `${i ? "L" : "M"}${x(i)},${y(p.cum)}`).join(" "), class: "series" }));
+
+  const cross = svg("line", { y1: pad.top, y2: height - pad.bottom, class: "crosshair", visibility: "hidden" });
+  const dot = svg("circle", { r: 5, class: "series-dot", visibility: "hidden" });
+  const hit = svg("rect", { x: pad.left, y: 0, width: width - pad.left - pad.right, height, fill: "transparent" });
+  chart.append(cross, dot, hit);
+  const tip = el("div", { class: "tooltip", hidden: true });
+  hit.addEventListener("mousemove", (event) => {
+    const box = chart.getBoundingClientRect();
+    const sx = ((event.clientX - box.left) / box.width) * width;
+    const ratio = (sx - pad.left) / (width - pad.left - pad.right);
+    const i = Math.max(0, Math.min(points.length - 1, Math.round(ratio * (points.length - 1))));
+    const p = points[i];
+    for (const [attr, value] of [["x1", x(i)], ["x2", x(i)], ["visibility", "visible"]]) cross.setAttribute(attr, value);
+    for (const [attr, value] of [["cx", x(i)], ["cy", y(p.cum)], ["visibility", "visible"]]) dot.setAttribute(attr, value);
+    tip.replaceChildren(
+      el("div", { class: "tip-title" }, p.day),
+      el("div", {}, `當日淨損益 ${signed(p.net.toFixed(4))}（${p.trades} 筆）`),
+      el("div", {}, `累計 ${signed(p.cum.toFixed(4))}`),
+    );
+    tip.hidden = false;
+    const left = (x(i) / width) * box.width;
+    tip.style.left = `${Math.min(left + 12, box.width - 190)}px`;
+    tip.style.top = `${(y(p.cum) / height) * box.height}px`;
+  });
+  hit.addEventListener("mouseleave", () => {
+    tip.hidden = true;
+    cross.setAttribute("visibility", "hidden");
+    dot.setAttribute("visibility", "hidden");
+  });
+  wrap.append(chart, tip);
+  return wrap;
+}
+
+async function renderPnl(container) {
+  const channels = await channelOptions();
+  const summaryArea = el("div");
+  const listArea = el("div");
+  let offset = 0;
+  const filters = filterBar([
+    selectField("期間", "range", [["30d", "近 30 天"], ["7d", "近 7 天"], ["today", "今天"], ["all", "全部"], ["custom", "自訂"]], "30d"),
+    inputField("起始日期（自訂）", "from", "", { type: "date" }),
+    inputField("結束日期（自訂，含）", "to", "", { type: "date" }),
+    selectField("頻道", "channel_id", channels, ""),
+    selectField("平倉原因", "close_reason", optionsFrom("closeReason"), ""),
+    inputField("幣種", "symbol", "", { placeholder: "例如 BTC" }),
+  ], () => {
+    offset = 0;
+    refresh();
+  });
+
+  function params() {
+    const f = filters.read();
+    return { ...rangeParams(f.range, f.from, f.to), channel_id: f.channel_id, close_reason: f.close_reason, symbol: f.symbol };
+  }
+
+  async function refresh() {
+    try {
+      const [data, list] = await Promise.all([
+        api(`/api/pnl/summary${query(params())}`),
+        api(`/api/pnl${query({ ...params(), limit: PAGE_SIZE, offset })}`),
+      ]);
+      const s = data.summary;
+      const winRate = s.win_rate === null ? "—" : `${(Number(s.win_rate) * 100).toFixed(1)}%`;
+      const missing = s.trades - s.trades_with_pnl;
+      summaryArea.replaceChildren(
+        el("div", { class: "tiles" }, [
+          tile("淨損益 (USDT)", signed(s.net_pnl ?? "0"), pnlTone(s.net_pnl)),
+          tile("平倉筆數", s.trades),
+          tile("勝率", winRate),
+          tile("獲利 / 虧損筆數", `${s.wins} / ${s.losses}`),
+          tile("最大單筆獲利", s.wins ? signed(s.best) : "—", s.wins ? pnlTone(s.best) : ""),
+          tile("最大單筆虧損", s.losses ? signed(s.worst) : "—", s.losses ? pnlTone(s.worst) : ""),
+        ]),
+        el("p", { class: "note" }, `淨損益 = Binance 已實現損益 − 平倉手續費（本期共 ${fmtNum(s.fees ?? "0")} USDT），進場手續費目前未計入。${missing ? `有 ${missing} 筆平倉時取不到成交資料，未計入損益與勝率。` : ""}`),
+        el("h2", { class: "section" }, "累計淨損益 (USDT)"),
+        cumulativeChart(data.daily),
+        el("h2", { class: "section" }, "每日統計"),
+        table([
+          { title: "日期", key: "day" },
+          { title: "平倉筆數", key: "trades", num: true },
+          { title: "獲利 / 虧損", render: (r) => `${r.wins} / ${r.losses}`, num: true },
+          { title: "淨損益 (USDT)", render: (r) => pnlCell(r.net_pnl), num: true },
+        ], [...data.daily].reverse(), null, "這段期間沒有平倉"),
+        el("h2", { class: "section" }, "平倉明細"),
+      );
+      listArea.replaceChildren(
+        pnlTable(list.items, "這段期間沒有平倉"),
+        pager(list.total, offset, (next) => {
+          offset = next;
+          refresh();
+        }),
+      );
+    } catch (error) {
+      summaryArea.replaceChildren(el("div", { class: "card bad" }, error.message));
+    }
+  }
+
+  container.append(filters.node, summaryArea, listArea);
+  refresh();
 }
 
 // ---------------------------------------------------------------- theses
