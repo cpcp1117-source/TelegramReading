@@ -28,6 +28,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session, sessionmaker
 
+from telegram_trader.analysis_setup import SETUP_PARSER_VERSION_PREFIX
 from telegram_trader.binance_market_data import (
     MarketPriceQuote,
     fetch_mark_price,
@@ -216,6 +217,22 @@ def effective_entry(
         return "LIMIT", [entry_value]
     assert signal.entry_type is not None
     return signal.entry_type, [Decimal(str(v)) for v in (signal.entry_values or [])]
+
+
+def _signal_timestamps(
+    signal: NormalizedSignal, raw_message: TelegramMessageVersion
+) -> tuple[datetime, datetime]:
+    """`(source_date, received_at)` for the Risk Engine's receive-lag check (BR-006).
+
+    That check asks "is the collector keeping up with the channel", which only matters for a
+    signal that is acted on right as it is posted. A draft raised by the analysis-setup monitor is
+    built hours after the analyst's post, from market data, so the original message's ingest lag
+    (e.g. a backfilled message) says nothing about it: user decision 2026-10-04, such drafts skip
+    this check. The user still approves each one, and its entry/stop/size are still validated.
+    """
+    if signal.parser_version.startswith(SETUP_PARSER_VERSION_PREFIX):
+        return raw_message.source_date, raw_message.source_date
+    return raw_message.source_date, raw_message.received_at
 
 
 def _config_with_size(config: RiskConfig, position_size_pct: Decimal | None) -> RiskConfig:
@@ -416,14 +433,15 @@ def preview_trade_intent(
                 extra={"context": {"symbol": signal.symbol, "signal_row_id": signal.signal_row_id}},
             )
 
+    source_date, received_at = _signal_timestamps(signal, raw_message)
     intent_input = TradeIntentInput(
         symbol=signal.symbol,
         side=signal.side,
         entry_type=preview_entry_type,
         entry_values=preview_entry_values,
         stop_value=draft.stop_value if draft is not None else signal.stop_value,
-        signal_source_date=raw_message.source_date,
-        signal_received_at=raw_message.received_at,
+        signal_source_date=source_date,
+        signal_received_at=received_at,
     )
     evaluation = evaluate_trade_intent(
         intent_input,
@@ -556,14 +574,15 @@ def run_risk_evaluation(
                     )
 
             stop_value = event.approved_stop_value
+            source_date, received_at = _signal_timestamps(signal, raw_message)
             intent_input = TradeIntentInput(
                 symbol=signal.symbol,
                 side=signal.side,
                 entry_type=approved_entry_type,
                 entry_values=entry_values,
                 stop_value=stop_value,
-                signal_source_date=raw_message.source_date,
-                signal_received_at=raw_message.received_at,
+                signal_source_date=source_date,
+                signal_received_at=received_at,
             )
             evaluation = evaluate_trade_intent(
                 intent_input,

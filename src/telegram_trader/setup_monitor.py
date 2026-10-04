@@ -27,6 +27,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from telegram_trader.analysis_setup import (
+    SETUP_PARSER_VERSION_PREFIX,
     Candle,
     PriceZone,
     SetupState,
@@ -39,7 +40,6 @@ from telegram_trader.setup_extraction import setup_event_id
 
 LOGGER = logging.getLogger(__name__)
 
-SETUP_PARSER_VERSION_PREFIX = "setup-"
 _SIGNAL_VALIDITY = timedelta(hours=6)
 _MAX_TRIGGER_AGE = timedelta(hours=2)
 _ACTIVE_STATUSES = ("WATCHING", "ZONE_TOUCHED")

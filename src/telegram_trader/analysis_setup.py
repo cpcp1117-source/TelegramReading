@@ -19,6 +19,10 @@ from typing import Any, Literal
 
 CURRENT_SETUP_SCHEMA_VERSION = "s1"
 
+# `normalized_signals.parser_version` of every signal a setup monitor raises is this prefix plus
+# the setup id. The Risk Engine uses it to tell a monitor-built draft from a live trading call.
+SETUP_PARSER_VERSION_PREFIX = "setup-"
+
 Side = Literal["LONG", "SHORT"]
 ConfirmRule = Literal["REJECT", "BREAK"]
 SetupStatus = Literal["WATCHING", "ZONE_TOUCHED", "TRIGGERED", "INVALIDATED", "EXPIRED"]

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -89,8 +89,14 @@ class FakeMarket:
         return [[start_time_ms, self._price, self._price, self._price, self._price]]
 
 
-def _seed_signal(factory: Any, tmp_path: Path, **overrides: Any) -> tuple[str, str]:
-    """A VALIDATED BTCUSDT LONG signal plus its raw message; returns `(signal_row_id, nonce)`."""
+def _seed_signal(
+    factory: Any, tmp_path: Path, *, ingest_lag: timedelta = timedelta(0), **overrides: Any
+) -> tuple[str, str]:
+    """A VALIDATED BTCUSDT LONG signal plus its raw message; returns `(signal_row_id, nonce)`.
+
+    `ingest_lag` is how long after the post the collector received the message (a backfilled
+    message has a large one).
+    """
     processor = TelegramMessageProcessor(
         factory, MediaStore(tmp_path / "media"), frozenset({(CHANNEL, None)})
     )
@@ -100,7 +106,7 @@ def _seed_signal(factory: Any, tmp_path: Path, **overrides: Any) -> tuple[str, s
             message_id=1,
             event_kind="NEW",
             source_date=POSTED,
-            received_at=POSTED,
+            received_at=POSTED + ingest_lag,
             text="BTC long",
             content_type="text",
         )
@@ -284,3 +290,35 @@ def test_load_current_draft_without_edits_starts_from_signal(
     assert draft.take_profits == [Decimal("120")]
     assert draft.position_size_pct == Decimal("0.1000")
     assert draft.entry_type is None
+
+
+def test_receive_lag_is_checked_for_live_signals_but_not_monitor_built_drafts(
+    engine: Engine, tmp_path: Path
+) -> None:
+    """User decision 2026-10-04: a draft raised by the setup monitor skips the receive-lag check."""
+    lag = timedelta(hours=3)  # e.g. the source message was backfilled long after it was posted
+
+    factory = create_session_factory(engine)
+    live_id, _ = _seed_signal(factory, tmp_path, ingest_lag=lag)
+    _approve(factory, live_id)
+    [live] = run_risk_evaluation(
+        factory, settings=_settings(), market_data_client=FakeMarket("100"), clock=lambda: NOW
+    )
+    assert live.verdict == "REJECTED"
+    assert "RECEIVE_LAG_TOO_HIGH" in live.reason_codes
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "TRUNCATE TABLE signal_decision_edits, signal_decision_events, "
+                "signal_decision_requests, normalized_signals, normalized_content, "
+                "telegram_message_versions, risk_config_snapshot, audit_events, outbox_events "
+                "RESTART IDENTITY CASCADE"
+            )
+        )
+    draft_id, _ = _seed_signal(factory, tmp_path, ingest_lag=lag, parser_version="setup-abc123")
+    _approve(factory, draft_id)
+    [draft] = run_risk_evaluation(
+        factory, settings=_settings(), market_data_client=FakeMarket("100"), clock=lambda: NOW
+    )
+    assert draft.verdict == "APPROVED"
