@@ -16,13 +16,16 @@ from telegram_trader.control_bot import (
     _format_decimal,
     _PendingEdit,
     decode_close_all_callback,
+    decode_daily_loss_callback,
     decode_edit_field_callback,
     decode_handled_callback,
     decode_signal_callback,
     encode_close_all_callback,
+    encode_daily_loss_callback,
     encode_edit_field_callback,
     encode_handled_callback,
     encode_signal_callback,
+    format_daily_loss_notification,
     format_execution_notification,
     format_setup_notification,
     format_signal_notification,
@@ -628,3 +631,36 @@ def test_handled_callback_is_not_confused_with_other_callbacks() -> None:
     assert decode_handled_callback(b"handled:") is None
     assert decode_handled_callback(bytes([0xFF])) is None
     assert decode_close_all_callback(encode_handled_callback("ab" * 32)) is None
+
+
+def test_daily_loss_callback_round_trip_stays_under_telegram_limit() -> None:
+    event_id = "ab" * 32
+    for decision in ("STOP", "CONTINUE"):
+        data = encode_daily_loss_callback(event_id, decision)
+        assert len(data) <= 64
+        assert decode_daily_loss_callback(data) == (event_id[:32], decision)
+    assert decode_daily_loss_callback(b"dailyloss:abc:MAYBE") is None
+    assert decode_daily_loss_callback(b"handled:abc") is None
+    assert decode_daily_loss_callback(b"\xff") is None
+
+
+def test_daily_loss_notification_states_taiwan_times_and_numbers() -> None:
+    event = OutboxEvent(
+        event_id="e" * 64,
+        event_type="execution_daily_loss_limit_reached",
+        aggregate_type="trading_control",
+        aggregate_id="2026-10-04",
+        payload={
+            "day_start_utc": "2026-10-04T00:00:00+00:00",
+            "net_pnl": "-61.2",
+            "loss_pct": "6.12",
+            "threshold_pct": "6",
+            "equity_usdt": "1000",
+        },
+    )
+    text = format_daily_loss_notification(event)
+    assert "台灣 10/04 08:00 起" in text
+    assert "-61.2 USDT" in text
+    assert "6.12%" in text
+    assert "門檻 6%" in text
+    assert "台灣時間 10/05 08:00 前" in text

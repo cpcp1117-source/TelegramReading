@@ -335,7 +335,7 @@ def test_testnet_mark_price_fetcher_returns_none_on_error(
     assert fetch("NOPE") is None
 
 
-def test_overview_passes_taipei_day_start_and_failure_definition(
+def test_overview_passes_utc_day_start_and_failure_definition(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, clock: _Clock
 ) -> None:
     from datetime import UTC, datetime
@@ -347,14 +347,14 @@ def test_overview_passes_taipei_day_start_and_failure_definition(
         return {"open_positions": 2}
 
     monkeypatch.setattr(console_records, "overview_counts", fake_counts)
-    # 2026-10-04 17:30 UTC is already 2026-10-05 01:30 in Taipei.
+    # 2026-10-04 17:30 UTC (Taipei 10/05 01:30) is still the UTC trading day 10/04.
     clock.now = datetime(2026, 10, 4, 17, 30, tzinfo=UTC).timestamp()
     _login(client)
 
     body = client.get("/api/overview").json()
 
     assert body == {"database": "available", "open_positions": 2}
-    assert seen["today_start"] == datetime(2026, 10, 4, 16, 0, tzinfo=UTC)
+    assert seen["today_start"] == datetime(2026, 10, 4, 0, 0, tzinfo=UTC)
     assert "execution_protection_failed" in seen["failure_event_types"]
     assert seen["handled_consumer"] == "control_bot_handled"
 
@@ -395,7 +395,7 @@ def test_pnl_routes_pass_filters(client: TestClient, monkeypatch: pytest.MonkeyP
     assert summary.json() == {"summary": {"trades": 0}, "daily": []}
     assert seen["summary"].close_reason == "STOP_LOSS"
     assert seen["summary"].since is not None
-    assert seen["tz"] == "Asia/Taipei"
+    assert seen["tz"] == "UTC"
 
     client.get("/api/pnl?symbol=BTC&channel_id=7&limit=5")
     flt, page = seen["list"]

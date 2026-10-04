@@ -16,6 +16,7 @@ from typing import Any
 from sqlalchemy import ColumnElement, Select, and_, func, literal, select
 from sqlalchemy.orm import Session, aliased
 
+from telegram_trader.daily_loss import active_pause
 from telegram_trader.models import (
     AuditEvent,
     ChannelPolicy,
@@ -851,7 +852,9 @@ def overview_counts(
     today = pnl_summary(session, PnlFilter(since=today_start))
     overall = pnl_summary(session, PnlFilter())
     recent_closes = list_pnl(session, PnlFilter(), Page(limit=5))["items"]
+    pause = active_pause(session, now)
     return {
+        "paused_until": to_json(pause.paused_until) if pause is not None else None,
         "open_positions": open_positions or 0,
         "awaiting_decision": awaiting_decision or 0,
         "unhandled_failures": unhandled_total or 0,

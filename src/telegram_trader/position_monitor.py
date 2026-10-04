@@ -27,6 +27,7 @@ from typing import Any
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
+from telegram_trader.daily_loss import DailyLossLimit, alert_if_daily_loss_limit_reached
 from telegram_trader.execution_gateway import _notify, _write_lifecycle, close_side_for
 from telegram_trader.models import ExchangeOrder, OrderLifecycle, RealizedPnl, TradeIntent
 
@@ -193,6 +194,7 @@ def _check_one(
     *,
     trading_client: Any,
     clock: Callable[[], datetime],
+    daily_loss_limit: DailyLossLimit | None = None,
 ) -> MonitorResult | None:
     if not _is_flat(trading_client, position.symbol):
         return None
@@ -314,6 +316,9 @@ def _check_one(
                 },
                 now=now,
             )
+        if daily_loss_limit is not None:
+            # Same transaction: the close that crosses the limit and the alert land together.
+            alert_if_daily_loss_limit_reached(session, daily_loss_limit, now)
     return MonitorResult(position.intent_id, position.symbol, close_reason)
 
 
@@ -322,6 +327,7 @@ def run_position_monitor(
     *,
     trading_client: Any,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    daily_loss_limit: DailyLossLimit | None = None,
 ) -> list[MonitorResult]:
     with session_factory() as session:
         positions = load_open_positions(session)
@@ -330,7 +336,11 @@ def run_position_monitor(
     for position in positions:
         try:
             result = _check_one(
-                session_factory, position, trading_client=trading_client, clock=clock
+                session_factory,
+                position,
+                trading_client=trading_client,
+                clock=clock,
+                daily_loss_limit=daily_loss_limit,
             )
         except Exception as error:
             # One bad symbol must not stop the others being checked. The failure is

@@ -34,6 +34,7 @@ from telegram_trader.binance_market_data import (
     fetch_reference_price,
 )
 from telegram_trader.config import Settings
+from telegram_trader.daily_loss import active_pause, daily_loss_pct
 from telegram_trader.models import (
     NormalizedSignal,
     RiskConfigSnapshot,
@@ -46,6 +47,7 @@ from telegram_trader.models import TradeIntent as TradeIntentRow
 from telegram_trader.outbox import append_outbox_event
 from telegram_trader.risk_engine import (
     REASON_SIGNAL_NOT_VALIDATED,
+    REASON_TRADING_PAUSED,
     AccountState,
     RiskConfig,
     RiskEvaluation,
@@ -95,14 +97,22 @@ def risk_config_from_settings(settings: Settings) -> RiskConfig:
     )
 
 
-def default_starting_account_state(config: RiskConfig) -> AccountState:
-    """Clean-slate starting point for one run -- see module docstring's Slice-1 caveat."""
+def default_starting_account_state(
+    config: RiskConfig, *, daily_realized_loss_pct: Decimal = Decimal(0)
+) -> AccountState:
+    """Clean-slate starting point for one run -- see module docstring's Slice-1 caveat.
+
+    `daily_realized_loss_pct` is the only real account input: today's (UTC day)
+    recorded net PnL over the equity baseline, from `daily_loss.daily_loss_pct`.
+    It only raises the DAILY_LOSS_KILL_SWITCH advisory; the actual stop is the
+    user's own Telegram answer (`daily_loss.active_pause`).
+    """
     return AccountState(
         equity_usdt=config.equity_baseline_usdt,
         open_position_count=0,
         open_position_sides={},
         total_initial_margin_used_usdt=Decimal(0),
-        daily_realized_loss_pct=Decimal(0),
+        daily_realized_loss_pct=daily_realized_loss_pct,
     )
 
 
@@ -313,6 +323,7 @@ def preview_trade_intent(
     config: RiskConfig,
     market_data_client: Any,
     now: datetime,
+    daily_realized_loss_pct: Decimal = Decimal(0),
 ) -> RiskEvaluation:
     """Read-only preview for the Control Bot's pre-approval notification.
 
@@ -370,7 +381,9 @@ def preview_trade_intent(
     return evaluate_trade_intent(
         intent_input,
         config=config,
-        account=default_starting_account_state(config),
+        account=default_starting_account_state(
+            config, daily_realized_loss_pct=daily_realized_loss_pct
+        ),
         market_price=market_price,
         reference_price=reference_price,
         now=now,
@@ -387,10 +400,14 @@ def run_risk_evaluation(
     """Evaluate every unprocessed `APPROVED` signal decision into a `TradeIntent`+`RiskDecision`."""
     config = risk_config_from_settings(settings)
     now = clock()
-    account = default_starting_account_state(config)
     results: list[RiskPipelineResult] = []
 
     with session_factory.begin() as session:
+        account = default_starting_account_state(
+            config,
+            daily_realized_loss_pct=daily_loss_pct(session, now, config.equity_baseline_usdt),
+        )
+        pause = active_pause(session, now)
         config_row = get_or_create_risk_config_snapshot(session, config, clock=now)
         pending = load_unprocessed_approved_events(session)
         for event, signal, raw_message in pending:
@@ -405,7 +422,7 @@ def run_risk_evaluation(
                     extra={"context": {"event_id": event.event_id, "intent_id": intent_id}},
                 )
                 continue
-            if signal.status != "VALIDATED":
+            if pause is not None or signal.status != "VALIDATED":
                 # Real gap found running this against the real database: the Control
                 # Bot notifies (and the user may approve) both NEW and VALIDATED
                 # signals (signal_decisions.load_pending_signals), but only VALIDATED
@@ -414,9 +431,13 @@ def run_risk_evaluation(
                 # instead of "LSKUSDT") -- not a real ticker, and Binance's own API
                 # would 400 on it. Reject explicitly rather than let a confusing raw
                 # HTTP error stand in for the real reason.
+                # The user answered STOP to today's daily-loss alert: no new orders
+                # until it lapses at the next UTC midnight.
                 evaluation = RiskEvaluation(
                     verdict="REJECTED",
-                    reason_codes=[REASON_SIGNAL_NOT_VALIDATED],
+                    reason_codes=[
+                        REASON_TRADING_PAUSED if pause is not None else REASON_SIGNAL_NOT_VALIDATED
+                    ],
                     computed_stop_price=None,
                     quantity=None,
                     entry_price_used=None,

@@ -35,6 +35,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from telegram_trader.binance_market_data import BinanceMarketDataClient
 from telegram_trader.binance_trading_client import create_trading_client
 from telegram_trader.config import Settings, get_settings
+from telegram_trader.daily_loss import DailyLossLimit
 from telegram_trader.db import create_db_engine, create_session_factory
 from telegram_trader.execution_gateway import run_execution
 from telegram_trader.logging_config import configure_logging
@@ -124,7 +125,14 @@ def run_cycle(
         ),
         (
             "position_monitor",
-            lambda: run_position_monitor(session_factory, trading_client=trading_client),
+            lambda: run_position_monitor(
+                session_factory,
+                trading_client=trading_client,
+                daily_loss_limit=DailyLossLimit(
+                    equity_usdt=settings.risk_equity_baseline_usdt,
+                    threshold_pct=settings.risk_daily_loss_kill_switch_pct,
+                ),
+            ),
         ),
     ]
     for step, run in steps:

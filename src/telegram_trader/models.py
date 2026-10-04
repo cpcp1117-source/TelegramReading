@@ -1185,6 +1185,34 @@ class RealizedPnl(Base):
     )
 
 
+class TradingPauseDecision(Base):
+    """The user's answer to one daily-loss kill-switch alert (migration 0024).
+
+    STOP pauses new orders until `paused_until` (the next UTC midnight after the
+    alert's day); CONTINUE keeps trading. One answer per alert. Append-only.
+    """
+
+    __tablename__ = "trading_pause_decisions"
+    __table_args__ = (
+        UniqueConstraint("source_event_id", name="uq_trading_pause_source_event"),
+        CheckConstraint("decision IN ('STOP', 'CONTINUE')", name="ck_trading_pause_decision_valid"),
+        CheckConstraint(
+            "(decision = 'STOP') = (paused_until IS NOT NULL)",
+            name="ck_trading_pause_until_only_for_stop",
+        ),
+        Index("ix_trading_pause_decisions_paused_until", "paused_until"),
+    )
+
+    decision_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    source_event_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    decision: Mapped[str] = mapped_column(String(10), nullable=False)
+    paused_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    actor_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    decided_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class AnalysisSetup(Base):
     """One monitorable trade idea the AI extracted from an ANALYSIS-channel message.
 

@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import Engine, event, func, select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from telegram_trader import cli as cli_module
 from telegram_trader.binance_market_data import (
@@ -30,7 +30,20 @@ from telegram_trader.channel_policy import (
     resolve_effective_targets,
 )
 from telegram_trader.config import Settings, TelegramChannelTarget, get_settings
-from telegram_trader.control_bot import ControlBot, encode_handled_callback
+from telegram_trader.control_bot import (
+    ControlBot,
+    encode_daily_loss_callback,
+    encode_handled_callback,
+)
+from telegram_trader.daily_loss import (
+    DAILY_LOSS_EVENT_TYPE,
+    DailyLossLimit,
+    active_pause,
+    alert_event_id,
+    alert_if_daily_loss_limit_reached,
+    record_pause_decision,
+    utc_day_start,
+)
 from telegram_trader.db import create_db_engine, create_session_factory, database_is_ready
 from telegram_trader.execution_gateway import _execute_one, load_eligible_intents
 from telegram_trader.execution_worker import StepHealth
@@ -113,7 +126,7 @@ def engine() -> Iterator[Engine]:
                 "normalized_content, binance_symbol_snapshots, "
                 "telegram_message_versions, telegram_collector_checkpoints, "
                 "mock_message_receipts, consumer_checkpoints, audit_events, "
-                "channel_policies "
+                "channel_policies, trading_pause_decisions "
                 "RESTART IDENTITY CASCADE"
             )
         )
@@ -3378,3 +3391,145 @@ def test_realized_pnl_is_append_only(engine: Engine) -> None:
             text("UPDATE realized_pnl SET realized_pnl = 0 WHERE intent_id = :id"),
             {"id": trade_intent.intent_id},
         )
+
+
+# ---------------------------------------------------------------- Daily loss kill switch (0024)
+
+
+def _close_losing_position(factory, channel_id: int, limit: DailyLossLimit | None) -> None:  # type: ignore[no-untyped-def]
+    """One BTCUSDT LONG closed by its stop at RISK_NOW: net -6.04 USDT."""
+    _open_protected_position(factory, channel_id)
+    run_position_monitor(
+        factory,
+        trading_client=_PositionClosedByStopTradingClient(),
+        clock=lambda: RISK_NOW,
+        daily_loss_limit=limit,
+    )
+
+
+def _button_texts(buttons: object) -> list[str]:
+    assert isinstance(buttons, list)
+    return [button.text for row in buttons for button in row]
+
+
+def _daily_alert(factory: sessionmaker[Session]) -> OutboxEvent | None:
+    with factory() as session:
+        return session.get(OutboxEvent, alert_event_id(utc_day_start(RISK_NOW)))
+
+
+def test_daily_loss_alert_is_raised_once_when_the_loss_reaches_the_limit(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    limit = DailyLossLimit(equity_usdt=Decimal("100"), threshold_pct=Decimal("0.06"))
+    _close_losing_position(factory, 990, limit)
+
+    alert = _daily_alert(factory)
+    assert alert is not None
+    assert alert.event_type == DAILY_LOSS_EVENT_TYPE
+    assert alert.payload == {
+        "day_start_utc": "2026-09-06T00:00:00+00:00",
+        "net_pnl": "-6.04",
+        "loss_pct": "6.04",
+        "threshold_pct": "6",
+        "equity_usdt": "100",
+    }
+    with factory.begin() as session:
+        assert not alert_if_daily_loss_limit_reached(session, limit, RISK_NOW)
+
+
+def test_daily_loss_alert_not_raised_below_limit_or_without_equity(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    _close_losing_position(
+        factory, 991, DailyLossLimit(equity_usdt=Decimal("1000"), threshold_pct=Decimal("0.06"))
+    )
+    assert _daily_alert(factory) is None
+    with factory.begin() as session:
+        assert not alert_if_daily_loss_limit_reached(
+            session, DailyLossLimit(equity_usdt=None, threshold_pct=Decimal("0.06")), RISK_NOW
+        )
+
+
+def test_daily_loss_stop_button_pauses_until_next_utc_midnight(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    _close_losing_position(
+        factory, 992, DailyLossLimit(equity_usdt=Decimal("100"), threshold_pct=Decimal("0.06"))
+    )
+    alert = _daily_alert(factory)
+    assert alert is not None
+    client = _RecordingBotClient()
+    asyncio.run(_control_bot(factory, client).notify_execution_events())
+    alert_messages = [(text, buttons) for text, buttons in client.sent if "熔斷" in text]
+    assert len(alert_messages) == 1
+    assert _button_texts(alert_messages[0][1]) == ["⛔ 停止今日開單", "▶️ 繼續開單"]
+
+    press = _CallbackEvent(encode_daily_loss_callback(alert.event_id, "STOP"))
+    asyncio.run(_control_bot(factory, client)._on_callback(press))
+    again = _CallbackEvent(encode_daily_loss_callback(alert.event_id, "CONTINUE"))
+    asyncio.run(_control_bot(factory, client)._on_callback(again))
+
+    assert "已停止今日開單" in press.edits[0][0]
+    assert "09/07 08:00" in press.edits[0][0]
+    assert again.answers[0][0] is not None and again.answers[0][0].startswith("之前已經選過了")
+    with factory() as session:
+        pause = active_pause(session, RISK_NOW)
+        assert pause is not None
+        assert pause.paused_until == datetime(2026, 9, 7, tzinfo=UTC)
+        assert active_pause(session, datetime(2026, 9, 7, tzinfo=UTC)) is None
+    # Answered, so no 5-minute reminder.
+    assert (
+        asyncio.run(_control_bot(factory, client, minutes_later=6).remind_unhandled_failures()) == 0
+    )
+
+
+def test_daily_loss_question_is_reminded_once_if_unanswered(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    _close_losing_position(
+        factory, 993, DailyLossLimit(equity_usdt=Decimal("100"), threshold_pct=Decimal("0.06"))
+    )
+    client = _RecordingBotClient()
+    asyncio.run(_control_bot(factory, client).notify_execution_events())
+    client.sent.clear()
+
+    assert (
+        asyncio.run(_control_bot(factory, client, minutes_later=6).remind_unhandled_failures()) >= 1
+    )
+    reminders = [(text, buttons) for text, buttons in client.sent if "熔斷" in text]
+    assert len(reminders) == 1
+    assert _button_texts(reminders[0][1]) == ["⛔ 停止今日開單", "▶️ 繼續開單"]
+
+
+def test_paused_trading_rejects_new_approvals_and_continue_does_not(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    day = utc_day_start(RISK_NOW)
+    with factory.begin() as session:
+        stop_alert = append_outbox_event(
+            session,
+            event_id=alert_event_id(day),
+            event_type=DAILY_LOSS_EVENT_TYPE,
+            aggregate_type="trading_control",
+            aggregate_id=day.date().isoformat(),
+            payload={"day_start_utc": day.isoformat()},
+        )
+        continue_alert = append_outbox_event(
+            session,
+            event_id="c" * 64,
+            event_type=DAILY_LOSS_EVENT_TYPE,
+            aggregate_type="trading_control",
+            aggregate_id=day.date().isoformat(),
+            payload={"day_start_utc": day.isoformat()},
+        )
+        session.flush()
+        record_pause_decision(
+            session, continue_alert, decision="CONTINUE", actor_user_id=555, now=RISK_NOW
+        )
+        assert active_pause(session, RISK_NOW) is None
+        record_pause_decision(session, stop_alert, decision="STOP", actor_user_id=555, now=RISK_NOW)
+    _approve_signal(factory, 994)
+
+    results = run_risk_evaluation(
+        factory,
+        settings=_risk_settings(),
+        market_data_client=_FakeRiskMarketDataClient(Decimal("100")),
+        clock=lambda: RISK_NOW,
+    )
+
+    assert [(r.verdict, r.reason_codes) for r in results] == [("REJECTED", ["TRADING_PAUSED"])]

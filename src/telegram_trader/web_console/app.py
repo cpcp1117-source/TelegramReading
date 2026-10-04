@@ -12,7 +12,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Any
@@ -37,6 +37,7 @@ from telegram_trader.control_bot import (
 from telegram_trader.control_bot import (
     _EXECUTION_HANDLED_CONSUMER_NAME as HANDLED_CONSUMER_NAME,
 )
+from telegram_trader.daily_loss import utc_day_start
 from telegram_trader.db import create_session_factory, database_is_ready
 from telegram_trader.web_console import records
 from telegram_trader.web_console.auth import (
@@ -51,9 +52,9 @@ from telegram_trader.web_console.records import MarkPriceFetcher, Page
 LOGGER = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
-# Day boundaries for "today" and the daily PnL table. Taiwan has no daylight saving.
-DISPLAY_TZ_NAME = "Asia/Taipei"
-DISPLAY_TZ = timezone(timedelta(hours=8))
+# Trading day for "today" and the daily PnL table: UTC 00:00 = Taiwan 08:00, the same
+# day the daily-loss kill switch counts (user decision 2026-10-04).
+TRADING_DAY_TZ_NAME = "UTC"
 AUDIT_AGGREGATE_TYPE = "web_console_session"
 
 Clock = Callable[[], float]
@@ -135,11 +136,6 @@ def _not_found(value: dict[str, Any] | None) -> dict[str, Any]:
     if value is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="找不到這筆記錄")
     return value
-
-
-def today_start(now: datetime) -> datetime:
-    local = now.astimezone(DISPLAY_TZ)
-    return local.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
 def create_app(
@@ -240,7 +236,7 @@ def create_app(
             session,
             failure_event_types=FAILURE_EVENT_TYPES,
             handled_consumer=HANDLED_CONSUMER_NAME,
-            today_start=today_start(now),
+            today_start=utc_day_start(now),
             now=now,
         )
         return {"database": "available", **counts}
@@ -258,7 +254,7 @@ def create_app(
         flt = records.PnlFilter(symbol, channel_id, close_reason, since, until)
         return {
             "summary": records.pnl_summary(session, flt),
-            "daily": records.pnl_daily(session, flt, DISPLAY_TZ_NAME),
+            "daily": records.pnl_daily(session, flt, TRADING_DAY_TZ_NAME),
         }
 
     @app.get("/api/pnl")

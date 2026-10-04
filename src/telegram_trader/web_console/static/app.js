@@ -77,6 +77,8 @@ const LABELS = {
     execution_worker_error: "執行服務異常",
     execution_worker_recovered: "執行服務已恢復",
     execution_advisory: "執行提醒",
+    execution_daily_loss_limit_reached: "每日虧損達熔斷門檻",
+    trading_pause_decided: "每日虧損熔斷的選擇",
     manual_test_signal: "手動測試訊號",
     web_console_login_succeeded: "管理介面登入成功",
     web_console_login_failed: "管理介面登入失敗",
@@ -95,6 +97,7 @@ const LABELS = {
     MAX_POSITIONS_REACHED: "已達最大持倉數",
     INVALID_STOP: "停損價不合理",
     QUANTITY_NOT_POSITIVE: "計算數量為零",
+    TRADING_PAUSED: "已暫停開單（每日虧損熔斷）",
   },
 };
 
@@ -377,7 +380,12 @@ async function renderOverview(container) {
       linkTile("目前持倉", data.open_positions, "", "#positions"),
       linkTile("等待核准的訊號", data.awaiting_decision, data.awaiting_decision ? "warn-text" : "", "#signals"),
       tile("未處理的失敗通知", data.unhandled_failures, data.unhandled_failures ? "bad" : "ok"),
-      linkTile("今日淨損益 (USDT)", signed(data.today.net_pnl ?? "0"), pnlTone(data.today.net_pnl), "#pnl"),
+      tile(
+        "開單狀態",
+        data.paused_until ? `已停止，${fmtTime(data.paused_until)} 恢復` : "正常",
+        data.paused_until ? "bad" : "ok",
+      ),
+      linkTile("今日淨損益 (USDT，台灣 08:00 起)", signed(data.today.net_pnl ?? "0"), pnlTone(data.today.net_pnl), "#pnl"),
       linkTile("累計淨損益 (USDT)", signed(data.overall.net_pnl ?? "0"), pnlTone(data.overall.net_pnl), "#pnl"),
     ]),
   );
@@ -629,11 +637,12 @@ function pnlTable(rows, emptyText) {
 }
 
 function rangeParams(range, from, to) {
-  const start = new Date();
-  start.setHours(0, 0, 0, 0);
+  // Trading days start at UTC 00:00 (Taiwan 08:00), same as the daily-loss kill switch.
+  const now = new Date();
+  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
   if (range === "today") return { since: start.toISOString() };
   if (range === "7d" || range === "30d") {
-    start.setDate(start.getDate() - (range === "7d" ? 6 : 29));
+    start.setUTCDate(start.getUTCDate() - (range === "7d" ? 6 : 29));
     return { since: start.toISOString() };
   }
   if (range === "custom") {
@@ -772,7 +781,7 @@ async function renderPnl(container) {
         el("p", { class: "note" }, `淨損益 = Binance 已實現損益 − 平倉手續費（本期共 ${fmtNum(s.fees ?? "0")} USDT），進場手續費目前未計入。${missing ? `有 ${missing} 筆平倉時取不到成交資料，未計入損益與勝率。` : ""}`),
         el("h2", { class: "section" }, "累計淨損益 (USDT)"),
         cumulativeChart(data.daily),
-        el("h2", { class: "section" }, "每日統計"),
+        el("h2", { class: "section" }, "每日統計（以 UTC 日期計，台灣 08:00 起算）"),
         table([
           { title: "日期", key: "day" },
           { title: "平倉筆數", key: "trades", num: true },

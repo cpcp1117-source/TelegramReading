@@ -6,7 +6,7 @@ import logging
 import secrets
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, cast
 
@@ -15,6 +15,12 @@ from telethon import Button, TelegramClient, events  # type: ignore[import-untyp
 
 from telegram_trader.binance_market_data import create_market_data_client
 from telegram_trader.config import Settings, get_settings
+from telegram_trader.daily_loss import (
+    DAILY_LOSS_EVENT_TYPE,
+    active_pause,
+    daily_loss_pct,
+    record_pause_decision,
+)
 from telegram_trader.db import create_db_engine, create_session_factory
 from telegram_trader.logging_config import configure_logging
 from telegram_trader.models import NormalizedSignal, OutboxEvent, SignalDecisionRequest
@@ -75,6 +81,8 @@ _CALLBACK_PREFIX_SIGNAL = "signal"
 _CALLBACK_PREFIX_CLOSE_ALL = "close_all"
 _CALLBACK_PREFIX_EDIT = "edit"
 _CALLBACK_PREFIX_HANDLED = "handled"
+_CALLBACK_PREFIX_DAILY_LOSS = "dailyloss"
+_TAIWAN = timezone(timedelta(hours=8))
 _CLOSE_ALL_CONFIRM_WINDOW_SECONDS = 30
 _EDIT_REPLY_WINDOW_SECONDS = 120
 _EDIT_FIELD_LABELS: dict[EditableField, str] = {"STOP": "停損", "TAKE_PROFIT": "停利"}
@@ -184,6 +192,59 @@ def decode_handled_callback(data: bytes) -> str | None:
 
 def _handled_buttons(event_id: str) -> list[list[Any]]:
     return [[Button.inline("✅ 我已處理", encode_handled_callback(event_id))]]
+
+
+def encode_daily_loss_callback(event_id: str, decision: str) -> bytes:
+    """`"dailyloss:<first 32 hex of event_id>:<STOP|CONTINUE>"` -- 52 bytes, under 64."""
+    prefix = event_id[:_HANDLED_CALLBACK_ID_CHARS]
+    return _CALLBACK_SEP.join((_CALLBACK_PREFIX_DAILY_LOSS, prefix, decision)).encode()
+
+
+def decode_daily_loss_callback(data: bytes) -> tuple[str, str] | None:
+    try:
+        text = data.decode()
+    except UnicodeDecodeError:
+        return None
+    parts = text.split(_CALLBACK_SEP)
+    if (
+        len(parts) != 3
+        or parts[0] != _CALLBACK_PREFIX_DAILY_LOSS
+        or not parts[1]
+        or parts[2] not in ("STOP", "CONTINUE")
+    ):
+        return None
+    return parts[1], parts[2]
+
+
+def _daily_loss_buttons(event_id: str) -> list[list[Any]]:
+    return [
+        [
+            Button.inline("⛔ 停止今日開單", encode_daily_loss_callback(event_id, "STOP")),
+            Button.inline("▶️ 繼續開單", encode_daily_loss_callback(event_id, "CONTINUE")),
+        ]
+    ]
+
+
+def _taiwan_time(moment: datetime) -> str:
+    return moment.astimezone(_TAIWAN).strftime("%m/%d %H:%M")
+
+
+def format_daily_loss_notification(event: OutboxEvent) -> str:
+    """The kill-switch question (user decision 2026-10-04): stop today, or keep going."""
+    payload = event.payload
+    day_start = datetime.fromisoformat(str(payload["day_start_utc"]))
+    resume_at = _taiwan_time(day_start + timedelta(days=1))
+    return "\n".join(
+        [
+            "🛑 今日虧損已達熔斷門檻",
+            f"今日（台灣 {_taiwan_time(day_start)} 起）已實現淨損益: {payload['net_pnl']} USDT",
+            f"虧損比例: {payload['loss_pct']}%（門檻 {payload['threshold_pct']}%，"
+            f"資金基準 {payload['equity_usdt']} USDT）",
+            "",
+            f"要停止今日開單嗎？停止後到台灣時間 {resume_at} 前，"
+            "新的核准都不會下單；已開的倉位和停損停利單不受影響。",
+        ]
+    )
 
 
 def _format_decimal(value: Decimal) -> str:
@@ -297,6 +358,7 @@ _EXECUTION_EVENT_TITLES: dict[str, str] = {
     ),
     "execution_worker_error": "🔥 自動執行服務出錯（會持續重試，恢復時會再通知）",
     "execution_worker_recovered": "✅ 自動執行服務已恢復",
+    DAILY_LOSS_EVENT_TYPE: "🛑 今日虧損已達熔斷門檻",
 }
 _SETUP_EVENT_TITLES: dict[str, str] = {
     "setup_created": "🧠 AI 整理出一個可監控的情境（已開始監控，尚未開單）",
@@ -327,6 +389,7 @@ _SETUP_FIELD_LABELS: dict[str, str] = {
 }
 _REMINDER_HEADER = "⏰ 提醒：這則失敗通知 5 分鐘內尚未處理"
 _HANDLED_FOOTER = "✅ 已標記為已處理"
+_DAILY_LOSS_REMINDER_HEADER = "⏰ 提醒：每日虧損熔斷 5 分鐘內尚未選擇"
 
 
 def format_setup_notification(event: OutboxEvent) -> str:
@@ -450,6 +513,12 @@ class ControlBot:
         count = 0
         with self._session_factory() as session:
             pending = load_pending_signals_with_source(session, now=self._clock())
+            pause = active_pause(session, self._clock()) if pending else None
+            loss_pct = (
+                daily_loss_pct(session, self._clock(), self._risk_config.equity_baseline_usdt)
+                if pending and self._risk_config is not None
+                else Decimal(0)
+            )
             for signal, raw_message in pending:
                 preview: RiskEvaluation | None = None
                 if self._risk_config is not None and self._market_data_client is not None:
@@ -460,6 +529,7 @@ class ControlBot:
                             config=self._risk_config,
                             market_data_client=self._market_data_client,
                             now=self._clock(),
+                            daily_realized_loss_pct=loss_pct,
                         )
                     except Exception:
                         LOGGER.exception(
@@ -467,14 +537,18 @@ class ControlBot:
                             extra={"context": {"signal_row_id": signal.signal_row_id}},
                         )
                 nonce = generate_nonce()
+                text = format_signal_notification(
+                    signal,
+                    preview=preview,
+                    leverage=self._risk_config.leverage if self._risk_config else None,
+                )
+                if pause is not None and pause.paused_until is not None:
+                    text = (
+                        f"⛔ 今日已停止開單（到台灣時間 {_taiwan_time(pause.paused_until)}），"
+                        f"現在核准也不會下單\n\n{text}"
+                    )
                 message = await self._client.send_message(
-                    self._allowlisted_user_id,
-                    format_signal_notification(
-                        signal,
-                        preview=preview,
-                        leverage=self._risk_config.leverage if self._risk_config else None,
-                    ),
-                    buttons=_signal_decision_buttons(nonce),
+                    self._allowlisted_user_id, text, buttons=_signal_decision_buttons(nonce)
                 )
                 create_request(session, signal, nonce=nonce, telegram_message_id=message.id)
                 session.commit()
@@ -524,13 +598,18 @@ class ControlBot:
             for event in pending:
                 is_failure = event.event_type in _EXECUTION_FAILURE_EVENT_TYPES
                 is_setup = event.event_type.startswith("setup_")
-                await self._client.send_message(
-                    self._allowlisted_user_id,
-                    format_setup_notification(event)
-                    if is_setup
-                    else format_execution_notification(event),
-                    buttons=_handled_buttons(event.event_id) if is_failure else None,
-                )
+                buttons: list[list[Any]] | None
+                if event.event_type == DAILY_LOSS_EVENT_TYPE:
+                    text = format_daily_loss_notification(event)
+                    buttons = _daily_loss_buttons(event.event_id)
+                else:
+                    text = (
+                        format_setup_notification(event)
+                        if is_setup
+                        else format_execution_notification(event)
+                    )
+                    buttons = _handled_buttons(event.event_id) if is_failure else None
+                await self._client.send_message(self._allowlisted_user_id, text, buttons=buttons)
                 consumer = OutboxConsumer(self._session_factory, _EXECUTION_OUTBOX_CONSUMER_NAME)
                 consumer.acknowledge(event.event_id)
                 count += 1
@@ -546,17 +625,23 @@ class ControlBot:
         with self._session_factory() as session:
             due = load_events_due_for_reminder(
                 session,
-                event_types=_EXECUTION_FAILURE_EVENT_TYPES,
+                event_types=_EXECUTION_FAILURE_EVENT_TYPES | {DAILY_LOSS_EVENT_TYPE},
                 delivered_consumer=_EXECUTION_OUTBOX_CONSUMER_NAME,
                 handled_consumer=_EXECUTION_HANDLED_CONSUMER_NAME,
                 reminded_consumer=_EXECUTION_REMINDER_CONSUMER_NAME,
                 delivered_before=self._clock() - _FAILURE_REMINDER_DELAY,
             )
             for event in due:
+                if event.event_type == DAILY_LOSS_EVENT_TYPE:
+                    header = _DAILY_LOSS_REMINDER_HEADER
+                    body = format_daily_loss_notification(event)
+                    buttons = _daily_loss_buttons(event.event_id)
+                else:
+                    header = _REMINDER_HEADER
+                    body = format_execution_notification(event)
+                    buttons = _handled_buttons(event.event_id)
                 await self._client.send_message(
-                    self._allowlisted_user_id,
-                    f"{_REMINDER_HEADER}\n\n{format_execution_notification(event)}",
-                    buttons=_handled_buttons(event.event_id),
+                    self._allowlisted_user_id, f"{header}\n\n{body}", buttons=buttons
                 )
                 consumer = OutboxConsumer(self._session_factory, _EXECUTION_REMINDER_CONSUMER_NAME)
                 consumer.acknowledge(event.event_id)
@@ -667,6 +752,11 @@ class ControlBot:
             return
 
         data = event.data
+        daily_loss = decode_daily_loss_callback(data)
+        if daily_loss is not None:
+            await self._decide_daily_loss(event, *daily_loss)
+            return
+
         handled_prefix = decode_handled_callback(data)
         if handled_prefix is not None:
             await self._mark_failure_handled(event, handled_prefix)
@@ -740,6 +830,32 @@ class ControlBot:
             return
         await event.edit(_OUTCOME_MESSAGES[outcome], buttons=None)
         await event.answer()
+
+    async def _decide_daily_loss(self, event: Any, event_id_prefix: str, decision: str) -> None:
+        with self._session_factory.begin() as session:
+            alert = find_event_by_id_prefix(session, event_id_prefix)
+            if alert is None or alert.event_type != DAILY_LOSS_EVENT_TYPE:
+                await event.answer("找不到這則通知", alert=True)
+                return
+            result = record_pause_decision(
+                session,
+                alert,
+                decision=decision,
+                actor_user_id=event.sender_id,
+                now=self._clock(),
+            )
+            text = format_daily_loss_notification(alert)
+            alert_event_id = alert.event_id
+        # Counts as handled, so the 5-minute reminder is not sent after an answer.
+        OutboxConsumer(self._session_factory, _EXECUTION_HANDLED_CONSUMER_NAME).acknowledge(
+            alert_event_id
+        )
+        if result.decision == "STOP" and result.paused_until is not None:
+            outcome = f"⛔ 已停止今日開單，到台灣時間 {_taiwan_time(result.paused_until)} 恢復"
+        else:
+            outcome = "▶️ 已選擇繼續開單"
+        await event.edit(f"{text}\n\n{outcome}", buttons=None)
+        await event.answer(f"之前已經選過了：{outcome}" if result.duplicate else outcome)
 
     async def _mark_failure_handled(self, event: Any, event_id_prefix: str) -> None:
         with self._session_factory() as session:

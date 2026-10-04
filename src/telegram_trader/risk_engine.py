@@ -67,6 +67,9 @@ REASON_SYMBOL_CONFLICT = "SYMBOL_CONFLICT"
 REASON_MAX_POSITIONS_REACHED = "MAX_POSITIONS_REACHED"
 REASON_INVALID_STOP = "INVALID_STOP"
 REASON_QUANTITY_NOT_POSITIVE = "QUANTITY_NOT_POSITIVE"
+# The user answered STOP to the day's daily-loss alert (daily_loss.py); set by the
+# pipeline, not by `evaluate_trade_intent`, which stays a pure function of its inputs.
+REASON_TRADING_PAUSED = "TRADING_PAUSED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,7 +103,7 @@ class AccountState:
     same-symbol-reverse conflict check. `total_initial_margin_used_usdt` is
     the sum of margin already committed by other open positions.
     `daily_realized_loss_pct` is negative for a loss (e.g. `-0.02` = -2%),
-    scoped to the current Asia/Taipei trading day by whatever supplies it.
+    scoped to the current UTC trading day (Taiwan 08:00 start, user decision 2026-10-04).
     """
 
     equity_usdt: Decimal
