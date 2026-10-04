@@ -4,10 +4,10 @@ const PAGE_SIZE = 50;
 
 const PAGES = {
   overview: { title: "總覽", render: renderOverview },
-  risk: { title: "風險參數" },
+  risk: { title: "風險參數", render: (c) => renderSettings(c, "risk") },
   channels: { title: "頻道授權與設定" },
   "analysis-monitor": { title: "分析頻道監控參數" },
-  runtime: { title: "運作參數" },
+  runtime: { title: "運作參數", render: (c) => renderSettings(c, "runtime") },
   signals: { title: "訊號與核准記錄", render: renderSignals },
   orders: { title: "開單記錄", render: renderOrders },
   positions: { title: "持倉資料", render: renderPositions },
@@ -901,6 +901,129 @@ async function renderAudit(container) {
       el("pre", { class: "json" }, JSON.stringify(row.payload, null, 2)),
     ]),
   });
+}
+
+// ---------------------------------------------------------------- settings
+
+const SETTINGS_INTRO = {
+  risk: "這裡的值會覆蓋 .env，執行服務下一輪（約 5 秒）就採用，不用重啟。只影響之後的新單，已開的倉位不會改變。",
+  runtime: "各項目標示了生效方式；標示「需重啟」的要重啟對應服務才會採用。",
+};
+
+function withUnit(value, unit) {
+  if (value === null || value === undefined) return "—";
+  return unit === "%" ? `${value}%` : `${value} ${unit}`.trim();
+}
+
+async function renderSettings(container, group) {
+  container.append(el("p", { class: "note" }, SETTINGS_INTRO[group]));
+  const body = el("div");
+  container.append(body);
+
+  async function draw(data, message) {
+    const inputs = new Map();
+    const resets = new Set();
+    const rows = data.items.map((item) => {
+      const input = el("input", {
+        type: "number",
+        step: item.kind === "int" ? "1" : "any",
+        min: item.minimum,
+        max: item.maximum,
+        value: item.effective ?? "",
+        "aria-label": item.label,
+      });
+      inputs.set(item.key, { input, item });
+      const source = item.override !== null
+        ? el("span", { class: "badge info" }, `網頁設定（.env：${withUnit(item.env_value, item.unit)}）`)
+        : el("span", { class: "badge" }, ".env 預設");
+      const reset = item.override !== null
+        ? el("button", {
+          type: "button",
+          class: "link-button",
+          onclick: () => {
+            resets.add(item.key);
+            input.value = item.env_value ?? "";
+            input.classList.add("changed");
+          },
+        }, "恢復 .env 預設")
+        : null;
+      input.addEventListener("input", () => {
+        resets.delete(item.key);
+        input.classList.toggle("changed", input.value !== (item.effective ?? ""));
+      });
+      return el("div", { class: "setting-row" }, [
+        el("div", { class: "setting-text" }, [
+          el("div", { class: "setting-label" }, item.label),
+          el("div", { class: "muted small" }, item.help),
+          el("div", { class: "muted small" }, `生效方式：${item.effect}`),
+        ]),
+        el("div", { class: "setting-input" }, [
+          el("div", { class: "input-unit" }, [input, el("span", { class: "unit" }, item.unit)]),
+          el("div", { class: "muted small" }, `範圍 ${withUnit(item.minimum, item.unit)} ～ ${withUnit(item.maximum, item.unit)}`),
+          el("div", { class: "source" }, [source, reset]),
+        ]),
+      ]);
+    });
+
+    const note = el("input", { type: "text", placeholder: "修改原因（選填，會記在歷史裡）", maxlength: "500" });
+    const status = el("div", { class: "save-status", role: "status" }, message || "");
+    const save = el("button", { type: "button", class: "primary" }, "儲存變更");
+    save.addEventListener("click", async () => {
+      const changes = {};
+      const lines = [];
+      for (const [key, { input, item }] of inputs) {
+        if (resets.has(key)) {
+          changes[key] = null;
+          lines.push(`${item.label}：${withUnit(item.effective, item.unit)} → .env 預設 ${withUnit(item.env_value, item.unit)}`);
+        } else if (input.value !== (item.effective ?? "")) {
+          changes[key] = input.value;
+          lines.push(`${item.label}：${withUnit(item.effective, item.unit)} → ${withUnit(input.value, item.unit)}`);
+        }
+      }
+      if (!lines.length) {
+        status.textContent = "沒有任何變更";
+        return;
+      }
+      if (!window.confirm(`確定要儲存以下變更？\n\n${lines.join("\n")}`)) return;
+      save.disabled = true;
+      try {
+        const result = await api(`/api/settings/${group}`, {
+          method: "POST",
+          body: JSON.stringify({ changes, note: note.value }),
+        });
+        draw(result, `已儲存 ${result.changes.length} 項變更`);
+      } catch (error) {
+        status.textContent = error.message;
+        status.classList.add("bad");
+        save.disabled = false;
+      }
+    });
+
+    const parts = [
+      el("div", { class: "card settings-card" }, rows),
+      el("div", { class: "save-bar" }, [note, save, status]),
+    ];
+    if (data.readonly.length) {
+      parts.push(
+        el("h2", { class: "section" }, "只能在 .env 修改的設定"),
+        el("div", { class: "card" }, kv(data.readonly.map((r) => [r.label, r.value]))),
+      );
+    }
+    parts.push(
+      el("h2", { class: "section" }, "修改歷史"),
+      table([
+        { title: "時間", render: (r) => fmtTime(r.changed_at) },
+        { title: "項目", key: "label" },
+        { title: "從", render: (r) => (r.from === null ? ".env 預設" : withUnit(r.from, r.unit)) },
+        { title: "改成", render: (r) => (r.to === null ? ".env 預設" : withUnit(r.to, r.unit)) },
+        { title: "修改人", key: "changed_by" },
+        { title: "原因", render: (r) => fmtNum(r.note), wrap: true },
+      ], data.history, null, "還沒有從網頁修改過"),
+    );
+    body.replaceChildren(...parts);
+  }
+
+  draw(await api(`/api/settings/${group}`));
 }
 
 // ---------------------------------------------------------------- router

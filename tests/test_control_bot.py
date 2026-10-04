@@ -716,3 +716,32 @@ def test_daily_loss_notification_states_taiwan_times_and_numbers() -> None:
     assert "6.12%" in text
     assert "門檻 6%" in text
     assert "台灣時間 10/05 08:00 前" in text
+
+
+def test_refresh_settings_picks_up_web_console_values() -> None:
+    from telegram_trader.config import Settings
+
+    current = {"settings": Settings(risk_equity_baseline_usdt=Decimal("5000"), risk_leverage=3)}
+    bot = ControlBot(
+        FakeBotClient(),
+        session_factory=None,  # type: ignore[arg-type]
+        bot_token="placeholder",
+        allowlisted_user_id=555,
+        settings_loader=lambda: current["settings"],
+    )
+
+    bot.refresh_settings()
+    assert bot._risk_config is not None
+    assert bot._risk_config.leverage == 3
+    assert bot._risk_config.equity_baseline_usdt == Decimal("5000")
+
+    current["settings"] = Settings(control_bot_poll_interval_seconds=15)
+    bot.refresh_settings()
+    assert bot._risk_config is None  # no equity baseline -> no sizing preview
+    assert bot._poll_interval_seconds == 15
+
+
+def test_refresh_settings_without_loader_keeps_constructor_values() -> None:
+    bot = _make_bot()
+    bot.refresh_settings()
+    assert bot._poll_interval_seconds == 0.01

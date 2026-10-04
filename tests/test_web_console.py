@@ -400,3 +400,49 @@ def test_pnl_routes_pass_filters(client: TestClient, monkeypatch: pytest.MonkeyP
     client.get("/api/pnl?symbol=BTC&channel_id=7&limit=5")
     flt, page = seen["list"]
     assert (flt.symbol, flt.channel_id, page.limit) == ("BTC", 7, 5)
+
+
+def test_settings_routes_validate_group_and_keys(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from telegram_trader import runtime_settings
+
+    monkeypatch.setattr(runtime_settings, "describe", lambda _s, _b, group: [{"group": group}])
+    monkeypatch.setattr(runtime_settings, "history", lambda _s, _g: [])
+    assert client.get("/api/settings/risk").status_code == 401
+    _login(client)
+
+    risk = client.get("/api/settings/risk").json()
+    assert risk == {"items": [{"group": "risk"}], "history": [], "readonly": []}
+    runtime = client.get("/api/settings/runtime").json()
+    assert {row["label"] for row in runtime["readonly"]} >= {"交易環境", "API Key 與密碼"}
+    assert client.get("/api/settings/secrets").status_code == 404
+
+    wrong_page = client.post(
+        "/api/settings/runtime", json={"changes": {"risk_leverage": "3"}, "note": None}
+    )
+    assert wrong_page.status_code == 400
+    unknown = client.post("/api/settings/risk", json={"changes": {"web_console_username": "x"}})
+    assert unknown.status_code == 400
+
+
+def test_settings_save_reports_validation_errors(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from contextlib import nullcontext
+
+    from sqlalchemy.orm import Session
+
+    from telegram_trader import runtime_settings
+
+    def reject(*_args: Any, **_kwargs: Any) -> list[Any]:
+        raise runtime_settings.SettingValueError("leverage out of range")
+
+    monkeypatch.setattr(runtime_settings, "record_changes", reject)
+    monkeypatch.setattr(Session, "begin", lambda _self: nullcontext())
+    _login(client)
+
+    response = client.post("/api/settings/risk", json={"changes": {"risk_leverage": "99"}})
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "leverage out of range"

@@ -17,6 +17,7 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from telegram_trader import cli as cli_module
+from telegram_trader import runtime_settings
 from telegram_trader.binance_market_data import (
     compute_snapshot_id,
     load_latest_snapshot,
@@ -64,6 +65,7 @@ from telegram_trader.models import (
     OutboxEvent,
     RealizedPnl,
     RiskConfigSnapshot,
+    RuntimeSettingChange,
     SignalDecisionEdit,
     SignalDecisionEvent,
     SignalDecisionRequest,
@@ -126,7 +128,7 @@ def engine() -> Iterator[Engine]:
                 "normalized_content, binance_symbol_snapshots, "
                 "telegram_message_versions, telegram_collector_checkpoints, "
                 "mock_message_receipts, consumer_checkpoints, audit_events, "
-                "channel_policies, trading_pause_decisions "
+                "channel_policies, trading_pause_decisions, runtime_setting_changes "
                 "RESTART IDENTITY CASCADE"
             )
         )
@@ -3533,3 +3535,110 @@ def test_paused_trading_rejects_new_approvals_and_continue_does_not(engine: Engi
     )
 
     assert [(r.verdict, r.reason_codes) for r in results] == [("REJECTED", ["TRADING_PAUSED"])]
+
+
+# ---------------------------------------------------------------- Web Console settings (0026)
+
+
+def test_runtime_settings_save_apply_reset_and_history(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    base = Settings(risk_equity_baseline_usdt=Decimal("10000"))
+    first = datetime(2026, 10, 4, 10, 0, tzinfo=UTC)
+
+    with factory.begin() as session:
+        diffs = runtime_settings.record_changes(
+            session,
+            base,
+            {
+                "risk_leverage": "3",
+                "risk_position_size_pct": "10",
+                "risk_max_receive_lag_seconds": "10",
+            },
+            actor="admin",
+            note="lower risk",
+            now=first,
+        )
+    # The unchanged lag (10 = the .env value) is a no-op, not a row.
+    assert [(d["key"], d["from"], d["to"]) for d in diffs] == [
+        ("risk_leverage", "5", "3"),
+        ("risk_position_size_pct", "20", "10"),
+    ]
+
+    effective = runtime_settings.load_effective_settings(factory, base)
+    assert effective.risk_leverage == 3
+    assert effective.risk_position_size_pct == Decimal("0.1")
+    assert effective.risk_equity_baseline_usdt == Decimal("10000")
+
+    with factory.begin() as session:
+        runtime_settings.record_changes(
+            session,
+            base,
+            {"risk_leverage": None},
+            actor="admin",
+            note=None,
+            now=first + timedelta(minutes=1),
+        )
+    effective = runtime_settings.load_effective_settings(factory, base)
+    assert effective.risk_leverage == 5
+    assert effective.risk_position_size_pct == Decimal("0.1")
+
+    with factory() as session:
+        items = {i["key"]: i for i in runtime_settings.describe(session, base, "risk")}
+        history = runtime_settings.history(session, "risk")
+        audit = session.scalars(
+            select(AuditEvent).where(AuditEvent.event_type == "settings_changed")
+        ).all()
+    assert items["risk_position_size_pct"]["override"] == "10"
+    assert items["risk_position_size_pct"]["env_value"] == "20"
+    assert items["risk_leverage"]["override"] is None
+    assert items["risk_leverage"]["effective"] == "5"
+    rows = [(h["key"], h["from"], h["to"]) for h in history]
+    assert rows[0] == ("risk_leverage", "3", None)  # newest first: the reset
+    assert sorted(rows[1:], key=str) == sorted(
+        [("risk_leverage", None, "3"), ("risk_position_size_pct", None, "10")], key=str
+    )
+    assert len(audit) == 2
+
+
+def test_runtime_settings_reject_invalid_save_entirely(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    base = Settings()
+    with (
+        pytest.raises(runtime_settings.SettingValueError, match="必須介於"),
+        factory.begin() as session,
+    ):
+        runtime_settings.record_changes(
+            session,
+            base,
+            {"risk_leverage": "3", "risk_position_size_pct": "500"},
+            actor="admin",
+            note=None,
+            now=datetime(2026, 10, 4, tzinfo=UTC),
+        )
+    assert runtime_settings.load_effective_settings(factory, base).risk_leverage == 5
+
+
+def test_runtime_settings_ignore_a_stored_value_now_out_of_range(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    with factory.begin() as session:
+        session.add(
+            RuntimeSettingChange(
+                change_id="x" * 64, key="risk_leverage", value="500", changed_by="old"
+            )
+        )
+        session.add(
+            RuntimeSettingChange(
+                change_id="y" * 64, key="no_longer_editable", value="1", changed_by="old"
+            )
+        )
+    assert runtime_settings.load_effective_settings(factory, Settings()).risk_leverage == 5
+
+
+def test_runtime_setting_changes_are_append_only(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    with factory.begin() as session:
+        session.add(
+            RuntimeSettingChange(change_id="z" * 64, key="risk_leverage", value="4", changed_by="a")
+        )
+    with pytest.raises(DBAPIError, match="append-only"), factory.begin() as session:
+        session.execute(text("DELETE FROM runtime_setting_changes"))

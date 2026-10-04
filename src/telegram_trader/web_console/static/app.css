@@ -420,3 +420,44 @@ h2.section {
 }
 
 .tooltip .tip-title { font-weight: 600; margin-bottom: 4px; }
+
+/* ---------- settings ---------- */
+
+.settings-card { padding: 0; }
+
+.setting-row {
+  display: grid;
+  grid-template-columns: 1fr 300px;
+  gap: 20px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.setting-row:last-child { border-bottom: none; }
+.setting-label { font-weight: 600; margin-bottom: 4px; }
+.small { font-size: 12px; margin-top: 2px; }
+
+.input-unit { display: flex; align-items: center; gap: 8px; }
+.input-unit input { width: 180px; }
+.input-unit .unit { color: var(--muted); min-width: 36px; }
+input.changed { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(47, 111, 237, 0.2); }
+
+.source { margin-top: 6px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+
+.link-button {
+  border: none;
+  background: none;
+  color: var(--accent);
+  padding: 0;
+  font-size: 12px;
+}
+
+.save-bar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-top: 14px;
+}
+
+.save-bar input { max-width: 380px; }
+.save-status { font-size: 13px; color: var(--muted); }

@@ -42,6 +42,7 @@ from telegram_trader.outbox import (
     load_pending_events,
 )
 from telegram_trader.risk_engine import RiskConfig, RiskEvaluation
+from telegram_trader.runtime_settings import effective_loader
 from telegram_trader.signal_decisions import (
     DecisionAction,
     DecisionOutcome,
@@ -513,6 +514,7 @@ class ControlBot:
         clock: Callable[[], datetime] | None = None,
         risk_config: RiskConfig | None = None,
         market_data_client: Any | None = None,
+        settings_loader: Callable[[], Settings] | None = None,
     ) -> None:
         """`risk_config`/`market_data_client` are optional: when either is `None`
 
@@ -537,10 +539,26 @@ class ControlBot:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._risk_config = risk_config
         self._market_data_client = market_data_client
+        self._settings_loader = settings_loader
         self._last_poll_at: datetime | None = None
         self._pending_close_all_nonce: str | None = None
         self._pending_close_all_expires_at: datetime | None = None
         self._pending_edit: _PendingEdit | None = None
+
+    def refresh_settings(self) -> None:
+        """Pick up Web Console changes (risk parameters, poll interval) before a poll.
+
+        Called once per signal poll, so a change reaches the Telegram preview within
+        one poll interval without a restart. Without a loader (tests) nothing changes.
+        """
+        if self._settings_loader is None:
+            return
+        settings = self._settings_loader()
+        self._poll_interval_seconds = settings.control_bot_poll_interval_seconds
+        try:
+            self._risk_config = risk_config_from_settings(settings)
+        except ValueError:
+            self._risk_config = None
 
     def _is_allowlisted(self, sender_id: int | None) -> bool:
         return sender_id is not None and sender_id == self._allowlisted_user_id
@@ -610,6 +628,7 @@ class ControlBot:
         while True:
             await asyncio.sleep(self._poll_interval_seconds)
             try:
+                self.refresh_settings()
                 await self.notify_pending_signals()
                 attempt = 0
             except asyncio.CancelledError:
@@ -1065,15 +1084,18 @@ async def _run() -> int:
     if settings.control_bot_token is None or settings.control_bot_allowlisted_user_id is None:
         raise ValueError("Control Bot credentials are unavailable")
 
+    settings_loader = effective_loader(session_factory, settings)
     risk_config: RiskConfig | None = None
     try:
-        risk_config = risk_config_from_settings(settings)
+        risk_config = risk_config_from_settings(settings_loader())
     except ValueError:
         LOGGER.warning(
             "RISK_EQUITY_BASELINE_USDT is not configured; pending-signal notifications "
-            "will be sent without a sizing preview until it is set"
+            "will be sent without a sizing preview until it is set (.env or Web Console)"
         )
-    market_data_client = create_market_data_client(settings) if risk_config is not None else None
+    # Public market data, no key: always available so a baseline set later from the
+    # Web Console turns the sizing preview on without a restart.
+    market_data_client = create_market_data_client(settings)
 
     client = create_bot_client(settings)
     bot = ControlBot(
@@ -1084,14 +1106,14 @@ async def _run() -> int:
         poll_interval_seconds=settings.control_bot_poll_interval_seconds,
         risk_config=risk_config,
         market_data_client=market_data_client,
+        settings_loader=settings_loader,
     )
     try:
         await bot.run_forever()
         return 0
     finally:
         await client.disconnect()
-        if market_data_client is not None:
-            market_data_client.close()
+        market_data_client.close()
         engine.dispose()
 
 

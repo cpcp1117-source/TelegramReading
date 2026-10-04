@@ -41,6 +41,7 @@ from telegram_trader.execution_gateway import run_execution
 from telegram_trader.logging_config import configure_logging
 from telegram_trader.outbox import append_outbox_event
 from telegram_trader.position_monitor import run_position_monitor
+from telegram_trader.runtime_settings import load_effective_settings
 from telegram_trader.trade_intent_pipeline import run_risk_evaluation
 
 LOGGER = logging.getLogger(__name__)
@@ -177,9 +178,10 @@ def main() -> int:
     )
     try:
         while not stop.is_set():
+            # Web Console changes (risk parameters) apply from the next cycle.
             run_cycle(
                 session_factory,
-                settings=settings,
+                settings=load_effective_settings(session_factory, settings),
                 market_data_client=market_data_client,
                 trading_client=trading_client,
                 health=health,

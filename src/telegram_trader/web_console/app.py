@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from telegram_trader import runtime_settings
 from telegram_trader.audit import append_audit_event
 from telegram_trader.binance_market_data import BinanceMarketDataClient, fetch_mark_price
 from telegram_trader.config import Settings
@@ -39,6 +40,7 @@ from telegram_trader.control_bot import (
 )
 from telegram_trader.daily_loss import utc_day_start
 from telegram_trader.db import create_session_factory, database_is_ready
+from telegram_trader.runtime_settings import SettingValueError
 from telegram_trader.web_console import records
 from telegram_trader.web_console.auth import (
     SESSION_COOKIE_NAME,
@@ -95,6 +97,39 @@ def db_session(request: Request) -> Iterator[Session]:
 
 
 Db = Annotated[Session, Depends(db_session)]
+
+
+SETTING_GROUPS = ("risk", "runtime")
+
+
+class SettingsUpdate(BaseModel):
+    # key -> display value, or null for "back to the .env default"
+    changes: dict[str, str | None] = Field(max_length=50)
+    note: str | None = Field(default=None, max_length=500)
+
+
+def _setting_group(group: str) -> str:
+    if group not in SETTING_GROUPS:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="沒有這個設定頁")
+    return group
+
+
+def _readonly_settings(settings: Settings) -> list[dict[str, str]]:
+    """Shown on the runtime page; changed only in .env (or are secrets held elsewhere)."""
+    return [
+        {"label": "交易環境", "value": settings.execution_environment},
+        {"label": "Binance 行情 API", "value": settings.binance_api_base_url},
+        {"label": "Binance 下單 API（Testnet）", "value": settings.binance_testnet_base_url},
+        {
+            "label": "監聽的 Telegram 頻道",
+            "value": "、".join(target.label for target in settings.telegram_target_channels),
+        },
+        {"label": "管理介面登入有效時間", "value": f"{settings.web_console_session_hours:g} 小時"},
+        {
+            "label": "API Key 與密碼",
+            "value": "存在 .env，各服務只拿到自己需要的；網頁不顯示也不修改",
+        },
+    ]
 
 
 class LoginRequest(BaseModel):
@@ -240,6 +275,44 @@ def create_app(
             now=now,
         )
         return {"database": "available", **counts}
+
+    def settings_page(session: Session, group: str) -> dict[str, Any]:
+        return {
+            "items": runtime_settings.describe(session, settings, group),
+            "history": runtime_settings.history(session, group),
+            "readonly": _readonly_settings(settings) if group == "runtime" else [],
+        }
+
+    @app.get("/api/settings/{group}")
+    def get_settings_page(_username: CurrentUser, session: Db, group: str) -> dict[str, Any]:
+        return settings_page(session, _setting_group(group))
+
+    @app.post("/api/settings/{group}")
+    def save_settings(
+        username: CurrentUser, session: Db, group: str, body: SettingsUpdate
+    ) -> dict[str, Any]:
+        group = _setting_group(group)
+        for key in body.changes:
+            spec = runtime_settings.SPECS.get(key)
+            if spec is None or spec.group != group:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST, detail=f"不能在這頁修改：{key}"
+                )
+        try:
+            with session.begin():
+                diffs = runtime_settings.record_changes(
+                    session,
+                    settings,
+                    dict(body.changes),
+                    actor=username,
+                    note=(body.note or "").strip() or None,
+                    now=datetime.fromtimestamp(clock(), UTC),
+                )
+        except SettingValueError as error:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)
+            ) from error
+        return {"changes": diffs, **settings_page(session, group)}
 
     @app.get("/api/pnl/summary")
     def pnl_summary(

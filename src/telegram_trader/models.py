@@ -1196,6 +1196,27 @@ class RealizedPnl(Base):
     )
 
 
+class RuntimeSettingChange(Base):
+    """One Web Console change to one setting (migration 0026). Append-only.
+
+    The newest row per `key` is in force; `value` NULL means "back to the .env
+    default". See `runtime_settings` for how services apply it.
+    """
+
+    __tablename__ = "runtime_setting_changes"
+    __table_args__ = (Index("ix_runtime_setting_changes_key_changed_at", "key", "changed_at"),)
+
+    change_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    key: Mapped[str] = mapped_column(String(100), nullable=False)
+    value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    previous_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    changed_by: Mapped[str] = mapped_column(String(200), nullable=False)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    changed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class TradingPauseDecision(Base):
     """The user's answer to one daily-loss kill-switch alert (migration 0024).
 
