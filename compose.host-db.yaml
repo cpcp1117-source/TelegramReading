@@ -1,0 +1,17 @@
+# Optional override: lets host-side tools (the analysis-setup worker, which must run next to the
+# logged-in Codex CLI) reach PostgreSQL on 127.0.0.1 only. Not part of the default stack.
+#
+#   docker compose -p telegram-trader-phase1 -f compose.yaml -f compose.host-db.yaml up -d db
+#
+# To turn it off again, recreate the db without this file:
+#   docker compose -p telegram-trader-phase1 -f compose.yaml up -d db
+#
+# `internal` is an internal-only network, which cannot publish ports, so db is also attached to
+# `edge`. The 127.0.0.1 binding keeps it unreachable from the LAN; the password is still required.
+services:
+  db:
+    ports:
+      - "127.0.0.1:5432:5432"
+    networks:
+      - internal
+      - edge

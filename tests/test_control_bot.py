@@ -24,6 +24,7 @@ from telegram_trader.control_bot import (
     encode_handled_callback,
     encode_signal_callback,
     format_execution_notification,
+    format_setup_notification,
     format_signal_notification,
     format_signals_list,
     format_status,
@@ -303,6 +304,33 @@ def _outbox_event(**overrides: object) -> OutboxEvent:
     }
     values.update(overrides)
     return OutboxEvent(**values)
+
+
+def test_format_setup_notification_labels_fields_and_skips_none() -> None:
+    text = format_setup_notification(
+        _outbox_event(
+            event_type="setup_triggered",
+            aggregate_type="analysis_setup",
+            payload={
+                "setup_id": "abc123",
+                "symbol": "DOTUSDT",
+                "side": "SHORT",
+                "entry_price": "1.1811",
+                "stop": None,
+                "note": "條件確認",
+            },
+        )
+    )
+    assert text.splitlines()[0].startswith("✅")
+    assert "幣種: DOTUSDT" in text
+    assert "預填進場價: 1.1811" in text
+    assert "停損" not in text
+    assert "abc123" not in text
+
+
+def test_format_setup_notification_unknown_type_falls_back() -> None:
+    text = format_setup_notification(_outbox_event(event_type="setup_something_new", payload={}))
+    assert "setup_something_new" in text
 
 
 def test_format_execution_notification_known_event_type_has_a_title() -> None:

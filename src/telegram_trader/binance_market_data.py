@@ -74,6 +74,29 @@ class BinanceMarketDataClient:
         result: list[list[Any]] = response.json()
         return result
 
+    def get_candles(
+        self, symbol: str, *, interval: str, start_time_ms: int, limit: int = 500
+    ) -> list[list[Any]]:
+        """Klines at `interval` from `start_time_ms` -- the analysis-setup monitor's input.
+
+        Public `/fapi/v1/klines`, no credential. Row layout: `[open_time, open, high, low,
+        close, volume, close_time, ...]`; the newest row may still be an unfinished candle,
+        which the caller must drop by comparing `close_time` with the current time.
+        """
+        response = self._http_client.get(
+            _KLINES_PATH,
+            params={
+                "symbol": symbol,
+                "interval": interval,
+                "startTime": start_time_ms,
+                "limit": limit,
+            },
+            timeout=10.0,
+        )
+        response.raise_for_status()
+        result: list[list[Any]] = response.json()
+        return result
+
     def close(self) -> None:
         self._http_client.close()
 

@@ -1146,3 +1146,99 @@ class PositionSnapshot(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class AnalysisSetup(Base):
+    """One monitorable trade idea the AI extracted from an ANALYSIS-channel message.
+
+    The AI only fills the *descriptive* fields (symbol, side, entry zone, stop,
+    targets); `confirm_rule`, expiry and every status transition are decided by
+    code in `setup_monitor`. `valid_from` is the source message's post time:
+    only market data after it may confirm the setup. A `TRIGGERED` setup has
+    produced a `normalized_signals` row (`signal_id`) that goes through the usual
+    Telegram approval -> Risk Engine -> Execution Gateway path; this table never
+    places an order by itself.
+    """
+
+    __tablename__ = "analysis_setups"
+    __table_args__ = (
+        CheckConstraint("side IN ('LONG', 'SHORT')", name="ck_analysis_setup_side_valid"),
+        CheckConstraint(
+            "status IN ('WATCHING', 'ZONE_TOUCHED', 'TRIGGERED', 'INVALIDATED', 'EXPIRED', "
+            "'SUPERSEDED')",
+            name="ck_analysis_setup_status_valid",
+        ),
+        CheckConstraint(
+            "confirm_rule IN ('REJECT', 'BREAK')", name="ck_analysis_setup_confirm_rule_valid"
+        ),
+        CheckConstraint(
+            "confidence IN ('HIGH', 'MEDIUM', 'LOW')", name="ck_analysis_setup_confidence_valid"
+        ),
+        CheckConstraint("entry_zone_low <= entry_zone_high", name="ck_analysis_setup_zone_ordered"),
+        Index("ix_analysis_setups_status", "status"),
+        Index("ix_analysis_setups_symbol", "symbol"),
+    )
+
+    setup_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    content_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("normalized_content.content_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    raw_message_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("telegram_message_versions.source_event_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    channel_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    topic_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    extraction_schema_version: Mapped[str] = mapped_column(String(20), nullable=False)
+    llm_model: Mapped[str] = mapped_column(String(100), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(30), nullable=False)
+    side: Mapped[str] = mapped_column(String(10), nullable=False)
+    entry_zone_low: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    entry_zone_high: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    confirm_rule: Mapped[str] = mapped_column(String(10), nullable=False)
+    trigger_price: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    stop_value: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    take_profits: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, server_default="[]")
+    cancel_if_target_first: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    confidence: Mapped[str] = mapped_column(String(10), nullable=False)
+    summary_zh: Mapped[str] = mapped_column(Text, nullable=False)
+    risk_notes: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, server_default="[]")
+    evidence_quotes: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, server_default="[]")
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    status_reason: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    valid_from: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    touched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    triggered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    signal_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    raw_llm_response: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class AnalysisSetupCheckpoint(Base):
+    """Extraction cursor for `extract_setups.py`; same design as `ThesisExtractionCheckpoint`."""
+
+    __tablename__ = "analysis_setup_checkpoints"
+    __table_args__ = (
+        CheckConstraint("channel_id > 0", name="ck_analysis_setup_checkpoint_channel_positive"),
+        CheckConstraint("topic_id >= 0", name="ck_analysis_setup_checkpoint_topic_non_negative"),
+    )
+
+    channel_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    topic_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, server_default="0")
+    extraction_schema_version: Mapped[str] = mapped_column(String(20), primary_key=True)
+    llm_model: Mapped[str] = mapped_column(String(100), primary_key=True)
+    last_created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_content_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )

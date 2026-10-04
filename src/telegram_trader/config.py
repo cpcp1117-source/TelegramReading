@@ -76,6 +76,12 @@ class Settings(BaseSettings):
                 username=None,
                 label="邦妮區塊鏈-BTC ETH 即時更新",
             ),
+            TelegramChannelTarget(
+                channel_id=3182714504,
+                topic_id=7,
+                username=None,
+                label="邦妮區塊鏈 VIP專屬CLUB (幣種分析)",
+            ),
         ],
         validation_alias=AliasChoices("TELEGRAM_TARGET_CHANNELS", "APP_TELEGRAM_TARGET_CHANNELS"),
     )
@@ -166,6 +172,48 @@ class Settings(BaseSettings):
         default=25,
         gt=0,
         validation_alias=AliasChoices("THESIS_BATCH_SIZE", "APP_THESIS_BATCH_SIZE"),
+    )
+    # Analysis-setup pipeline (AI turns an ANALYSIS-channel message into a
+    # monitorable setup; code, not the AI, watches the market and decides when
+    # a draft is raised). `ai_provider="codex"` runs the locally logged-in
+    # Codex CLI instead of calling the OpenAI HTTP API, so no API key is needed.
+    ai_provider: Literal["openai", "codex"] = Field(
+        default="openai",
+        validation_alias=AliasChoices("AI_PROVIDER", "APP_AI_PROVIDER"),
+    )
+    codex_cli_path: str = Field(
+        default="codex",
+        validation_alias=AliasChoices("CODEX_CLI_PATH", "APP_CODEX_CLI_PATH"),
+    )
+    ai_cli_timeout_seconds: float = Field(
+        default=180.0,
+        gt=0,
+        validation_alias=AliasChoices("AI_CLI_TIMEOUT_SECONDS", "APP_AI_CLI_TIMEOUT_SECONDS"),
+    )
+    setup_model: str = Field(
+        default="gpt-5.6-sol",
+        validation_alias=AliasChoices("SETUP_MODEL", "APP_SETUP_MODEL"),
+    )
+    setup_batch_size: int = Field(
+        default=10,
+        gt=0,
+        validation_alias=AliasChoices("SETUP_BATCH_SIZE", "APP_SETUP_BATCH_SIZE"),
+    )
+    setup_context_message_count: int = Field(
+        default=8,
+        ge=0,
+        validation_alias=AliasChoices(
+            "SETUP_CONTEXT_MESSAGE_COUNT", "APP_SETUP_CONTEXT_MESSAGE_COUNT"
+        ),
+    )
+    setup_expiry_hours: int = Field(
+        default=48,
+        gt=0,
+        validation_alias=AliasChoices("SETUP_EXPIRY_HOURS", "APP_SETUP_EXPIRY_HOURS"),
+    )
+    setup_confirm_interval: Literal["5m", "15m", "30m", "1h"] = Field(
+        default="15m",
+        validation_alias=AliasChoices("SETUP_CONFIRM_INTERVAL", "APP_SETUP_CONFIRM_INTERVAL"),
     )
     # Phase 6 Slice 1 -- Risk Engine (FR-016). Numeric defaults below are the
     # spec's own fixed BR-006/007/008/009/010/011 values, not arbitrary --

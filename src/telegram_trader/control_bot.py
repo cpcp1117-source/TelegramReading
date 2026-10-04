@@ -66,6 +66,9 @@ _EXECUTION_FAILURE_EVENT_TYPES = frozenset(
         "execution_worker_error",
     }
 )
+# Outbox event-type prefixes the Control Bot forwards to the user: Execution Gateway outcomes and
+# the analysis-setup pipeline's (`setup_*`) heads-up / draft-created / closed notices.
+_FORWARDED_EVENT_PREFIXES = ("execution_", "setup_")
 _HANDLED_CALLBACK_ID_CHARS = 32
 _CALLBACK_SEP = ":"
 _CALLBACK_PREFIX_SIGNAL = "signal"
@@ -295,8 +298,46 @@ _EXECUTION_EVENT_TITLES: dict[str, str] = {
     "execution_worker_error": "🔥 自動執行服務出錯（會持續重試，恢復時會再通知）",
     "execution_worker_recovered": "✅ 自動執行服務已恢復",
 }
+_SETUP_EVENT_TITLES: dict[str, str] = {
+    "setup_created": "🧠 AI 整理出一個可監控的情境（已開始監控，尚未開單）",
+    "setup_zone_touched": "👀 價格碰到進場區",
+    "setup_triggered": "✅ 條件確認——開單草稿已建立",
+    "setup_invalidated": "🚫 情境失效，停止監控",
+    "setup_expired": "⌛ 情境已過期，停止監控",
+    "setup_worker_error": "🔥 分析監控服務出錯（會持續重試，恢復時會再通知）",
+    "setup_worker_recovered": "✅ 分析監控服務已恢復",
+    "setup_extraction_failed": "⚠️ AI 整理這則分析訊息失敗（會自動重試；持續失敗請檢查 AI 登入）",
+}
+_SETUP_FIELD_LABELS: dict[str, str] = {
+    "symbol": "幣種",
+    "side": "方向",
+    "confidence": "信心",
+    "summary": "摘要",
+    "entry_zone": "進場區",
+    "entry_price": "預填進場價",
+    "stop": "停損",
+    "targets": "目標",
+    "confirm_rule": "確認條件",
+    "risk_notes": "風險提醒",
+    "reason": "原因",
+    "note": "說明",
+    "step": "步驟",
+    "error": "錯誤",
+    "previous_error": "先前錯誤",
+}
 _REMINDER_HEADER = "⏰ 提醒：這則失敗通知 5 分鐘內尚未處理"
 _HANDLED_FOOTER = "✅ 已標記為已處理"
+
+
+def format_setup_notification(event: OutboxEvent) -> str:
+    """Renders one analysis-setup outbox event (`setup_*`) as a Telegram message."""
+    title = _SETUP_EVENT_TITLES.get(event.event_type, f"ℹ️ {event.event_type}")
+    lines = [title]
+    for key, value in event.payload.items():
+        if value is None or key == "setup_id":
+            continue
+        lines.append(f"{_SETUP_FIELD_LABELS.get(key, key)}: {value}")
+    return "\n".join(lines)
 
 
 def format_execution_notification(event: OutboxEvent) -> str:
@@ -471,16 +512,23 @@ class ControlBot:
         """
         count = 0
         with self._session_factory() as session:
-            pending = load_pending_events(
-                session,
-                consumer_name=_EXECUTION_OUTBOX_CONSUMER_NAME,
-                event_type_prefix="execution_",
-            )
+            pending = [
+                event
+                for prefix in _FORWARDED_EVENT_PREFIXES
+                for event in load_pending_events(
+                    session,
+                    consumer_name=_EXECUTION_OUTBOX_CONSUMER_NAME,
+                    event_type_prefix=prefix,
+                )
+            ]
             for event in pending:
                 is_failure = event.event_type in _EXECUTION_FAILURE_EVENT_TYPES
+                is_setup = event.event_type.startswith("setup_")
                 await self._client.send_message(
                     self._allowlisted_user_id,
-                    format_execution_notification(event),
+                    format_setup_notification(event)
+                    if is_setup
+                    else format_execution_notification(event),
                     buttons=_handled_buttons(event.event_id) if is_failure else None,
                 )
                 consumer = OutboxConsumer(self._session_factory, _EXECUTION_OUTBOX_CONSUMER_NAME)
