@@ -215,3 +215,117 @@ def _console_settings() -> Settings:
         web_console_password_hash=SecretStr(hash_password(PLAIN)),
         web_console_session_secret=SecretStr(SECRET),
     )
+
+
+RECORD_ROUTES = (
+    "/api/channels",
+    "/api/signals/facets",
+    "/api/signals",
+    "/api/signals/x",
+    "/api/orders",
+    "/api/orders/x",
+    "/api/positions",
+    "/api/theses",
+    "/api/theses/x",
+    "/api/audit/facets",
+    "/api/audit",
+)
+
+
+def test_record_routes_require_login(client: TestClient) -> None:
+    for path in RECORD_ROUTES:
+        assert client.get(path).status_code == 401, path
+
+
+def test_record_routes_pass_filters_and_404_missing_rows(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from telegram_trader.web_console import records
+
+    seen: dict[str, Any] = {}
+
+    def capture(name: str, result: Any) -> Any:
+        def fake(_session: Any, *args: Any) -> Any:
+            seen[name] = args
+            return result
+
+        return fake
+
+    page_result = {"items": [], "total": 0}
+    monkeypatch.setattr(records, "list_channels", capture("channels", []))
+    monkeypatch.setattr(records, "parser_versions", capture("versions", ["v3"]))
+    monkeypatch.setattr(records, "list_signals", capture("signals", page_result))
+    monkeypatch.setattr(records, "signal_detail", capture("signal", None))
+    monkeypatch.setattr(records, "list_orders", capture("orders", page_result))
+    monkeypatch.setattr(records, "order_detail", capture("order", {"intent_id": "i"}))
+    monkeypatch.setattr(records, "list_open_positions", capture("positions", []))
+    monkeypatch.setattr(records, "list_theses", capture("theses", page_result))
+    monkeypatch.setattr(records, "thesis_detail", capture("thesis", None))
+    monkeypatch.setattr(records, "audit_facets", capture("facets", {"event_types": []}))
+    monkeypatch.setattr(records, "list_audit", capture("audit", page_result))
+    _login(client)
+
+    assert client.get("/api/signals/facets").json() == {"parser_versions": ["v3"]}
+    signals = client.get(
+        "/api/signals?status=VALIDATED&decision=approved&channel_id=5&limit=10&offset=20"
+    )
+    assert signals.json() == page_result
+    flt, page = seen["signals"]
+    assert (flt.status, flt.decision, flt.channel_id) == ("VALIDATED", "approved", 5)
+    assert (page.limit, page.offset) == (10, 20)
+
+    assert client.get("/api/signals/missing").status_code == 404
+    assert client.get("/api/theses/missing").status_code == 404
+    assert client.get("/api/orders/i").json() == {"intent_id": "i"}
+
+    client.get("/api/orders?state=NONE&verdict=REJECTED")
+    assert (seen["orders"][0].state, seen["orders"][0].verdict) == ("NONE", "REJECTED")
+    client.get("/api/theses?direction=BULLISH&status=DRAFT")
+    assert (seen["theses"][0].direction, seen["theses"][0].status) == ("BULLISH", "DRAFT")
+    client.get("/api/audit?event_type=x&since=2026-10-01T00:00:00Z")
+    assert seen["audit"][0].event_type == "x"
+    assert seen["audit"][0].since is not None
+    assert client.get("/api/positions").json() == []
+    assert client.get("/api/channels").json() == []
+
+
+def test_page_clamps_limit_and_offset() -> None:
+    from telegram_trader.web_console.records import Page
+
+    assert Page(limit=10_000, offset=-5).clamp() == Page(limit=200, offset=0)
+    assert Page(limit=0).clamp().limit == 1
+
+
+def test_to_json_strips_trailing_zeros_and_serializes_nested() -> None:
+    from datetime import UTC, datetime
+    from decimal import Decimal
+
+    from telegram_trader.web_console.records import to_json
+
+    assert to_json(Decimal("0.30000000")) == "0.3"
+    assert to_json(Decimal("100.00000000")) == "100"
+    assert to_json(Decimal("100")) == "100"
+    assert to_json({"a": [Decimal("1.50")]}) == {"a": ["1.5"]}
+    assert to_json(datetime(2026, 10, 4, tzinfo=UTC)) == "2026-10-04T00:00:00+00:00"
+
+
+def test_testnet_mark_price_fetcher_returns_none_on_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from decimal import Decimal
+
+    import httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params["symbol"] == "BTCUSDT":
+            return httpx.Response(200, json={"markPrice": "65000.5"})
+        return httpx.Response(400, json={"code": -1121})
+
+    real_client = httpx.Client
+    monkeypatch.setattr(
+        "httpx.Client",
+        lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs),
+    )
+    fetch = app_module.testnet_mark_price_fetcher(_console_settings())
+    assert fetch("BTCUSDT") == Decimal("65000.5")
+    assert fetch("NOPE") is None

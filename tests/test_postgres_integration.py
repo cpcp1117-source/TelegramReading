@@ -83,6 +83,7 @@ from telegram_trader.telegram_storage import (
 )
 from telegram_trader.thesis_extraction import ThesisExtractionResult, run_thesis_extraction
 from telegram_trader.trade_intent_pipeline import run_risk_evaluation
+from telegram_trader.web_console import records as console_records
 
 pytestmark = pytest.mark.integration
 
@@ -3081,3 +3082,137 @@ def test_worker_step_failure_is_notified_once_and_recovery_once(engine: Engine) 
         "execution_worker_recovered",
     ]
     assert "binance down" in events[0].payload["error"]
+
+
+# ---------------------------------------------------------------- Web Console record queries
+
+
+def test_console_signals_list_filters_by_decision_and_detail_shows_flow(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    request_id = _create_signal_and_request(factory, 960)
+    with factory.begin() as session:
+        signal = session.scalar(select(NormalizedSignalRow))
+        assert signal is not None
+        request = session.get(SignalDecisionRequest, request_id)
+        assert request is not None
+        create_edit(session, request, field="STOP", value=Decimal("90"))
+    page = console_records.Page()
+
+    with factory() as session:
+        pending = console_records.list_signals(
+            session, console_records.SignalFilter(decision="pending"), page
+        )
+        assert pending["total"] == 1
+        assert pending["items"][0]["outcome"] is None
+        assert pending["items"][0]["request_id"] == request_id
+
+    with factory.begin() as session:
+        record_decision(
+            session,
+            request_id=request_id,
+            actor_user_id=555,
+            callback_query_id="cbq-console",
+            action="APPROVE",
+            now=SIGNAL_FIXTURE_NOW,
+        )
+
+    with factory() as session:
+        approved = console_records.list_signals(
+            session, console_records.SignalFilter(decision="approved"), page
+        )
+        assert approved["total"] == 1
+        assert approved["items"][0]["outcome"] == "APPROVED"
+        assert approved["items"][0]["symbol"] == "BTCUSDT"
+        rejected = console_records.list_signals(
+            session, console_records.SignalFilter(decision="rejected"), page
+        )
+        assert rejected["total"] == 0
+        assert console_records.parser_versions(session) == [signal.parser_version]
+
+        detail = console_records.signal_detail(session, signal.signal_row_id)
+        assert detail is not None
+        assert detail["message"]["text"] == "BTC 多 市價進場"
+        assert [edit["stop_value"] for edit in detail["edits"]] == ["90"]
+        assert [d["outcome"] for d in detail["decisions"]] == ["APPROVED"]
+        assert detail["decisions"][0]["approved_stop_value"] == "90"
+        assert console_records.signal_detail(session, "missing") is None
+
+
+def test_console_orders_and_open_positions(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    intent = _open_protected_position(factory, 961)
+    page = console_records.Page()
+
+    with factory() as session:
+        orders = console_records.list_orders(session, console_records.OrderFilter(), page)
+        assert orders["total"] == 1
+        row = orders["items"][0]
+        assert row["intent_id"] == intent.intent_id
+        assert row["verdict"] == "APPROVED"
+        assert row["state"] == "PROTECTED"
+        assert row["entry_status"] == "FILLED"
+        none_yet = console_records.list_orders(
+            session, console_records.OrderFilter(state="NONE"), page
+        )
+        assert none_yet["total"] == 0
+
+        detail = console_records.order_detail(session, intent.intent_id)
+        assert detail is not None
+        assert detail["risk_decision"]["verdict"] == "APPROVED"
+        assert detail["lifecycle"][-1]["state"] == "PROTECTED"
+        assert detail["protection"]["state"] == "CONFIRMED"
+        assert {o["purpose"] for o in detail["exchange_orders"]} >= {"ENTRY", "PROTECTION"}
+        assert any(e["event_type"] == "execution_entry_filled" for e in detail["events"])
+
+        positions = console_records.list_open_positions(session, lambda _symbol: Decimal("110"))
+        assert len(positions) == 1
+        position = positions[0]
+        assert position["symbol"] == "BTCUSDT"
+        assert position["mark_price"] == "110"
+        quantity = Decimal(position["quantity"])
+        entry_price = Decimal(position["entry_price"])
+        expected = ((Decimal("110") - entry_price) * quantity).quantize(Decimal("0.0001"))
+        assert Decimal(position["unrealized_pnl"]) == expected
+
+        unavailable = console_records.list_open_positions(session, lambda _symbol: None)
+        assert unavailable[0]["unrealized_pnl"] is None
+
+
+def test_console_theses_and_audit(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    with factory.begin() as session:
+        session.add(_channel_policy_analysis(962))
+    _seed_thesis_candidate(factory, 962)
+    run_thesis_extraction(factory, _FakeOpenAiClient(), model="gpt-4o-mini")
+    page = console_records.Page()
+
+    with factory() as session:
+        theses = console_records.list_theses(
+            session, console_records.ThesisFilter(channel_id=962), page
+        )
+        assert theses["total"] == 1
+        assert theses["items"][0]["primary_direction"] == "NEUTRAL"
+        bearish = console_records.list_theses(
+            session, console_records.ThesisFilter(direction="BEARISH"), page
+        )
+        assert bearish["total"] == 0
+        detail = console_records.thesis_detail(session, theses["items"][0]["thesis_row_id"])
+        assert detail is not None
+        assert detail["source_text_included"] == _THESIS_SOURCE_TEXT
+        assert detail["conditions"][0]["trigger_price"] == "773"
+
+        facets = console_records.audit_facets(session)
+        assert "telegram.message.persisted" in facets["event_types"]
+        audit = console_records.list_audit(
+            session,
+            console_records.AuditFilter(event_type="telegram.message.persisted"),
+            console_records.Page(limit=1),
+        )
+        assert audit["total"] >= 1
+        assert len(audit["items"]) == 1
+        future = console_records.list_audit(
+            session,
+            console_records.AuditFilter(since=datetime.now(UTC) + timedelta(days=1)),
+            page,
+        )
+        assert future["total"] == 0

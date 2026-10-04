@@ -7,14 +7,18 @@ Telegram Control Bot; nothing here approves or places a trade.
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+import httpx
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -22,8 +26,10 @@ from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from telegram_trader.audit import append_audit_event
+from telegram_trader.binance_market_data import BinanceMarketDataClient, fetch_mark_price
 from telegram_trader.config import Settings
 from telegram_trader.db import create_session_factory, database_is_ready
+from telegram_trader.web_console import records
 from telegram_trader.web_console.auth import (
     SESSION_COOKIE_NAME,
     LoginThrottle,
@@ -31,6 +37,9 @@ from telegram_trader.web_console.auth import (
     read_session_token,
     verify_password,
 )
+from telegram_trader.web_console.records import MarkPriceFetcher, Page
+
+LOGGER = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
 AUDIT_AGGREGATE_TYPE = "web_console_session"
@@ -66,6 +75,15 @@ def require_user(request: Request) -> str:
 CurrentUser = Annotated[str, Depends(require_user)]
 
 
+def db_session(request: Request) -> Iterator[Session]:
+    factory: sessionmaker[Session] = request.app.state.session_factory
+    with factory() as session:
+        yield session
+
+
+Db = Annotated[Session, Depends(db_session)]
+
+
 class LoginRequest(BaseModel):
     username: str = Field(max_length=200)
     password: str = Field(max_length=1024)
@@ -85,7 +103,35 @@ def _record_audit(
         )
 
 
-def create_app(settings: Settings, engine: Engine, *, clock: Clock = time.time) -> FastAPI:
+def testnet_mark_price_fetcher(settings: Settings) -> MarkPriceFetcher:
+    """Public premiumIndex on the Testnet host the positions live on -- no API key."""
+    client = BinanceMarketDataClient(
+        httpx.Client(base_url=settings.binance_testnet_base_url, timeout=5.0)
+    )
+
+    def fetch(symbol: str) -> Decimal | None:
+        try:
+            return fetch_mark_price(client, symbol).price
+        except (httpx.HTTPError, ValueError) as exc:
+            LOGGER.warning("mark price unavailable", extra={"symbol": symbol, "error": str(exc)})
+            return None
+
+    return fetch
+
+
+def _not_found(value: dict[str, Any] | None) -> dict[str, Any]:
+    if value is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="找不到這筆記錄")
+    return value
+
+
+def create_app(
+    settings: Settings,
+    engine: Engine,
+    *,
+    clock: Clock = time.time,
+    mark_price: MarkPriceFetcher | None = None,
+) -> FastAPI:
     if (
         settings.web_console_username is None
         or settings.web_console_password_hash is None
@@ -101,9 +147,10 @@ def create_app(settings: Settings, engine: Engine, *, clock: Clock = time.time) 
     )
     session_factory = create_session_factory(engine)
     throttle = LoginThrottle()
-
+    fetch_mark = mark_price or testnet_mark_price_fetcher(settings)
     app = FastAPI(title="Telegram Trader Web Console", docs_url=None, redoc_url=None)
     app.state.auth = auth
+    app.state.session_factory = session_factory
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     @app.get("/health/live")
@@ -170,5 +217,101 @@ def create_app(settings: Settings, engine: Engine, *, clock: Clock = time.time) 
     @app.get("/api/overview")
     def overview(_username: CurrentUser) -> dict[str, Any]:
         return {"database": "available" if database_is_ready(engine) else "unavailable"}
+
+    @app.get("/api/channels")
+    def channels(_username: CurrentUser, session: Db) -> list[dict[str, Any]]:
+        return records.list_channels(session)
+
+    @app.get("/api/signals/facets")
+    def signal_facets(_username: CurrentUser, session: Db) -> dict[str, Any]:
+        return {"parser_versions": records.parser_versions(session)}
+
+    @app.get("/api/signals")
+    def signals(
+        _username: CurrentUser,
+        session: Db,
+        parser_version: str | None = None,
+        status_: Annotated[str | None, Query(alias="status")] = None,
+        symbol: str | None = None,
+        channel_id: int | None = None,
+        decision: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        flt = records.SignalFilter(
+            parser_version=parser_version,
+            status=status_,
+            symbol=symbol,
+            channel_id=channel_id,
+            decision=decision,
+        )
+        return records.list_signals(session, flt, Page(limit, offset))
+
+    @app.get("/api/signals/{signal_row_id}")
+    def signal(_username: CurrentUser, session: Db, signal_row_id: str) -> dict[str, Any]:
+        return _not_found(records.signal_detail(session, signal_row_id))
+
+    @app.get("/api/orders")
+    def orders(
+        _username: CurrentUser,
+        session: Db,
+        symbol: str | None = None,
+        verdict: str | None = None,
+        state: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        flt = records.OrderFilter(symbol=symbol, verdict=verdict, state=state)
+        return records.list_orders(session, flt, Page(limit, offset))
+
+    @app.get("/api/orders/{intent_id}")
+    def order(_username: CurrentUser, session: Db, intent_id: str) -> dict[str, Any]:
+        return _not_found(records.order_detail(session, intent_id))
+
+    @app.get("/api/positions")
+    def positions(_username: CurrentUser, session: Db) -> list[dict[str, Any]]:
+        return records.list_open_positions(session, fetch_mark)
+
+    @app.get("/api/theses")
+    def theses(
+        _username: CurrentUser,
+        session: Db,
+        channel_id: int | None = None,
+        direction: str | None = None,
+        status_: Annotated[str | None, Query(alias="status")] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        flt = records.ThesisFilter(channel_id=channel_id, direction=direction, status=status_)
+        return records.list_theses(session, flt, Page(limit, offset))
+
+    @app.get("/api/theses/{thesis_row_id}")
+    def thesis(_username: CurrentUser, session: Db, thesis_row_id: str) -> dict[str, Any]:
+        return _not_found(records.thesis_detail(session, thesis_row_id))
+
+    @app.get("/api/audit/facets")
+    def audit_facets(_username: CurrentUser, session: Db) -> dict[str, Any]:
+        return records.audit_facets(session)
+
+    @app.get("/api/audit")
+    def audit(
+        _username: CurrentUser,
+        session: Db,
+        event_type: str | None = None,
+        aggregate_type: str | None = None,
+        aggregate_id: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        flt = records.AuditFilter(
+            event_type=event_type,
+            aggregate_type=aggregate_type,
+            aggregate_id=aggregate_id,
+            since=since,
+            until=until,
+        )
+        return records.list_audit(session, flt, Page(limit, offset))
 
     return app

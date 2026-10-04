@@ -245,6 +245,8 @@ services:
       APP_SERVICE_NAME: web-console
       APP_HTTP_HOST: 0.0.0.0
       APP_HTTP_PORT: 8080
+      # Public mark price for the positions page only; no API key is passed.
+      BINANCE_TESTNET_BASE_URL: ${BINANCE_TESTNET_BASE_URL:-https://demo-fapi.binance.com}
       WEB_CONSOLE_USERNAME: ${WEB_CONSOLE_USERNAME:-}
       WEB_CONSOLE_PASSWORD_HASH: ${WEB_CONSOLE_PASSWORD_HASH:-}
       WEB_CONSOLE_SESSION_SECRET: ${WEB_CONSOLE_SESSION_SECRET:-}
