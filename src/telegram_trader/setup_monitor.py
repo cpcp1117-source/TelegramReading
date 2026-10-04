@@ -41,7 +41,7 @@ LOGGER = logging.getLogger(__name__)
 
 SETUP_PARSER_VERSION_PREFIX = "setup-"
 _SIGNAL_VALIDITY = timedelta(hours=6)
-_MAX_TRIGGER_AGE = timedelta(hours=1)
+_MAX_TRIGGER_AGE = timedelta(hours=2)
 _ACTIVE_STATUSES = ("WATCHING", "ZONE_TOUCHED")
 _INTERVAL_SECONDS = {"5m": 300, "15m": 900, "30m": 1800, "1h": 3600}
 

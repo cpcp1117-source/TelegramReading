@@ -192,11 +192,13 @@ def test_break_rule_needs_close_beyond_trigger_and_clamps_entry() -> None:
 
 
 def test_trigger_confirmed_long_ago_is_stale_not_a_draft() -> None:
-    candles = [_candle(0, "1.19", "1.195", "1.17", "1.18")]  # confirms at T0+15m; NOW is 24h later
+    candles = [
+        _candle(0, "1.19", "1.195", "1.17", "1.18")
+    ]  # confirms at T0+15m; NOW is 24h later; limit is 2h
 
-    stale = evaluate_candles(_state(), candles, now=NOW, max_trigger_age=timedelta(hours=1))
+    stale = evaluate_candles(_state(), candles, now=NOW, max_trigger_age=timedelta(hours=2))
     fresh = evaluate_candles(
-        _state(), candles, now=T0 + timedelta(minutes=30), max_trigger_age=timedelta(hours=1)
+        _state(), candles, now=T0 + timedelta(minutes=90), max_trigger_age=timedelta(hours=2)
     )
 
     assert (stale.status, stale.reason, stale.events) == ("INVALIDATED", "TRIGGER_STALE", ())
