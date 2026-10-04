@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>交易監控登入</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div class="login-wrap">
+    <form class="card login-card" id="login-form">
+      <h1>交易監控管理介面</h1>
+      <label for="username">帳號</label>
+      <input id="username" name="username" autocomplete="username" required autofocus>
+      <label for="password">密碼</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+      <button class="primary" type="submit">登入</button>
+      <div class="error" id="error" role="alert"></div>
+    </form>
+  </div>
+  <script>
+    document.getElementById("login-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const error = document.getElementById("error");
+      error.textContent = "";
+      const response = await fetch("/api/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: document.getElementById("username").value,
+          password: document.getElementById("password").value,
+        }),
+      });
+      if (response.ok) {
+        window.location.href = "/";
+        return;
+      }
+      const body = await response.json().catch(() => ({}));
+      error.textContent = body.detail || "登入失敗";
+    });
+  </script>
+</body>
+</html>

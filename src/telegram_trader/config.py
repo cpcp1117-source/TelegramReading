@@ -9,7 +9,9 @@ from pydantic import AliasChoices, BaseModel, Field, SecretStr, field_validator,
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import URL, make_url
 
-RuntimeEnvironment = Literal["offline", "telegram_readonly", "control_bot", "execution_gateway"]
+RuntimeEnvironment = Literal[
+    "offline", "telegram_readonly", "control_bot", "execution_gateway", "web_console"
+]
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
 
@@ -224,6 +226,35 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Web Console -- the only credentials it holds are its own login; it never
+    # receives an exchange, Telegram or OpenAI secret (ADR-0002).
+    web_console_username: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("WEB_CONSOLE_USERNAME", "APP_WEB_CONSOLE_USERNAME"),
+    )
+    web_console_password_hash: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("WEB_CONSOLE_PASSWORD_HASH", "APP_WEB_CONSOLE_PASSWORD_HASH"),
+    )
+    web_console_session_secret: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "WEB_CONSOLE_SESSION_SECRET", "APP_WEB_CONSOLE_SESSION_SECRET"
+        ),
+    )
+    web_console_session_hours: float = Field(
+        default=12.0,
+        gt=0,
+        validation_alias=AliasChoices("WEB_CONSOLE_SESSION_HOURS", "APP_WEB_CONSOLE_SESSION_HOURS"),
+    )
+
+    @field_validator("web_console_username", mode="before")
+    @classmethod
+    def blank_web_console_username_to_none(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
     @field_validator("risk_equity_baseline_usdt", mode="before")
     @classmethod
     def blank_risk_equity_baseline_to_none(cls, value: object) -> object:
@@ -298,6 +329,8 @@ class Settings(BaseSettings):
         "openai_api_key",
         "binance_testnet_api_key",
         "binance_testnet_api_secret",
+        "web_console_password_hash",
+        "web_console_session_secret",
     )
     @classmethod
     def blank_optional_secret_to_none(cls, value: SecretStr | None) -> SecretStr | None:
@@ -367,6 +400,18 @@ class Settings(BaseSettings):
                 "BINANCE_TESTNET_API_KEY and BINANCE_TESTNET_API_SECRET are required "
                 "for execution_gateway"
             )
+        if self.environment == "web_console":
+            if (
+                self.web_console_username is None
+                or self.web_console_password_hash is None
+                or self.web_console_session_secret is None
+            ):
+                raise ValueError(
+                    "WEB_CONSOLE_USERNAME, WEB_CONSOLE_PASSWORD_HASH and "
+                    "WEB_CONSOLE_SESSION_SECRET are required for web_console"
+                )
+            if len(self.web_console_session_secret.get_secret_value()) < 32:
+                raise ValueError("WEB_CONSOLE_SESSION_SECRET must be at least 32 characters")
         return self
 
     @property

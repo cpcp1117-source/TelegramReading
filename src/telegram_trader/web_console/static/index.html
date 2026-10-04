@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>交易監控管理</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div class="layout">
+    <nav class="sidebar" id="sidebar">
+      <div class="brand">交易監控管理</div>
+      <a href="#overview">總覽</a>
+      <div class="nav-group">設定</div>
+      <a href="#risk">風險參數</a>
+      <a href="#channels">頻道授權與設定</a>
+      <a href="#analysis-monitor">分析頻道監控參數</a>
+      <a href="#runtime">運作參數</a>
+      <div class="nav-group">記錄</div>
+      <a href="#signals">訊號與核准記錄</a>
+      <a href="#orders">開單記錄</a>
+      <a href="#positions">持倉資料</a>
+      <a href="#pnl">損益記錄</a>
+      <a href="#theses">分析草稿</a>
+      <a href="#audit">稽核日誌</a>
+      <div class="spacer"></div>
+      <div class="account">
+        <span id="username"></span>
+        <button type="button" id="logout">登出</button>
+      </div>
+    </nav>
+    <main id="page"></main>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

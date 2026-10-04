@@ -65,6 +65,7 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 # Control Bot reply text, not an accidental encoding issue.
 "src/telegram_trader/control_bot.py" = ["RUF001"]
 "src/telegram_trader/position_monitor.py" = ["RUF001"]
+"src/telegram_trader/web_console/app.py" = ["RUF001"]
 
 [tool.mypy]
 python_version = "3.11"
