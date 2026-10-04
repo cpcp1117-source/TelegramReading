@@ -69,6 +69,7 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 "src/telegram_trader/analysis_setup.py" = ["RUF001", "RUF002"]
 "src/telegram_trader/setup_monitor.py" = ["RUF001"]
 "src/telegram_trader/setup_extraction.py" = ["RUF001"]
+"src/telegram_trader/draft_edit.py" = ["RUF001"]
 
 [tool.mypy]
 python_version = "3.11"
