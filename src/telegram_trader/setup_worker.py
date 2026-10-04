@@ -1,14 +1,18 @@
-"""Analysis-setup worker: normalize analyst messages, let the AI describe them, watch the market.
+"""Analysis-setup worker: normalize messages, parse trading calls, describe analyses, watch markets.
 
 One long-running loop, intended to run **on the host** next to the logged-in Codex CLI (the
 containers have no AI login). Each cycle runs, in order:
 
 1. `refresh_snapshot` when the Binance symbol snapshot is stale (symbol validation needs it)
 2. `run_normalization`   -- new raw messages -> `normalized_content`
-3. `run_setup_extraction` -- AI turns analyst messages into stored setups (slow: ~10-30 s each)
-4. `run_setup_monitor`    -- cheap, no AI: replay market candles, notify, raise drafts
+3. `run_signal_parsing`   -- rule-based parse of EXECUTION_SIGNAL channels (e.g. Monster) into
+                            `normalized_signals`, which the Control Bot then notifies (added
+                            2026-10-05: nothing else ran it, so no Monster signal had been parsed
+                            since 2026-09-15)
+4. `run_setup_extraction` -- AI turns analyst messages into stored setups (slow: ~10-30 s each)
+5. `run_setup_monitor`    -- cheap, no AI: replay market candles, notify, raise drafts
 
-Steps 3 and 4 are separate cadences: monitoring must not wait behind a slow AI call, so the
+Steps 4 and 5 are separate cadences: monitoring must not wait behind a slow AI call, so the
 extraction runs at most every `--extract-seconds`, the monitor every cycle. A failing step is
 notified once and its recovery once (same `StepHealth` idea as the execution worker).
 """
@@ -37,6 +41,7 @@ from telegram_trader.db import create_db_engine, create_session_factory
 from telegram_trader.logging_config import configure_logging
 from telegram_trader.normalize_content import run_normalization
 from telegram_trader.outbox import append_outbox_event
+from telegram_trader.parse_signals import run_signal_parsing
 from telegram_trader.setup_extraction import run_setup_extraction, setup_event_id
 from telegram_trader.setup_monitor import run_setup_monitor
 
@@ -47,6 +52,7 @@ _DEFAULT_EXTRACT_SECONDS = 60.0
 _STEP_LABELS = {
     "snapshot": "幣種清單更新",
     "normalization": "訊息整理",
+    "signal_parsing": "訊號解析",
     "extraction": "AI 分析",
     "monitor": "市場監控",
 }
@@ -116,6 +122,13 @@ def run_cycle(
             lambda: run_normalization(
                 session_factory,
                 snapshot_max_age_seconds=settings.binance_snapshot_max_age_seconds,
+            ),
+        ),
+        (
+            "signal_parsing",
+            lambda: run_signal_parsing(
+                session_factory,
+                risk_flagged_size_pct=settings.risk_flagged_position_size_pct,
             ),
         ),
     ]
