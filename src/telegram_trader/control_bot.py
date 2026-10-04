@@ -27,6 +27,7 @@ from telegram_trader.draft_edit import (
     EntryEdit,
     parse_entry_input,
     parse_size_input,
+    parse_take_profit_input,
 )
 from telegram_trader.logging_config import configure_logging
 from telegram_trader.models import (
@@ -787,11 +788,13 @@ class ControlBot:
                 new_value = parse_entry_input(text)
             elif pending.field == "SIZE":
                 new_value = parse_size_input(text)
+            elif pending.field == "TAKE_PROFIT":
+                new_value = parse_take_profit_input(text)
             else:
                 value = Decimal(text.strip())
                 if not value.is_finite() or value <= 0:
                     raise InvalidOperation("value must be positive")
-                new_value = value if pending.field == "STOP" else [value]
+                new_value = value
         except DraftEditError as error:
             await event.reply(f"⚠️ {error}，或重新點擊編輯按鈕。")
             return
@@ -916,7 +919,7 @@ class ControlBot:
                 hint = "（純數字）"
             elif field == "TAKE_PROFIT":
                 current_value = ", ".join(_format_decimal(tp) for tp in draft.take_profits) or None
-                hint = "（純數字）"
+                hint = "（可以輸入多個，用逗號或空白隔開，例如 1.10, 1.05；數量會平均分配）"
             elif field == "ENTRY":
                 if draft.entry_type == "MARKET":
                     current_value = "市價"

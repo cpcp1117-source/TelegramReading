@@ -137,6 +137,7 @@ class SymbolFilters:
 
     tick_size: Decimal
     step_size: Decimal
+    min_qty: Decimal = Decimal(0)  # `LOT_SIZE.minQty`; 0 = unknown / no minimum
 
 
 def get_symbol_filters(exchange_info: dict[str, Any], symbol: str) -> SymbolFilters:
@@ -149,14 +150,16 @@ def get_symbol_filters(exchange_info: dict[str, Any], symbol: str) -> SymbolFilt
             continue
         tick_size: Decimal | None = None
         step_size: Decimal | None = None
+        min_qty = Decimal(0)
         for filt in entry.get("filters", []):
             if filt.get("filterType") == "PRICE_FILTER":
                 tick_size = Decimal(str(filt["tickSize"]))
             elif filt.get("filterType") == "LOT_SIZE":
                 step_size = Decimal(str(filt["stepSize"]))
+                min_qty = Decimal(str(filt.get("minQty", "0")))
         if tick_size is None or step_size is None:
             raise ValueError(f"{symbol!r} exchangeInfo is missing PRICE_FILTER/LOT_SIZE")
-        return SymbolFilters(tick_size=tick_size, step_size=step_size)
+        return SymbolFilters(tick_size=tick_size, step_size=step_size, min_qty=min_qty)
     raise ValueError(f"{symbol!r} not found in exchangeInfo")
 
 

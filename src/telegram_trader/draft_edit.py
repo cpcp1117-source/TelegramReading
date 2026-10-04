@@ -6,6 +6,7 @@ a validated value or a short Traditional-Chinese error the bot can send straight
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Literal
@@ -51,3 +52,19 @@ def parse_size_input(text: str) -> Decimal:
     if percent > MAX_POSITION_SIZE_PCT:
         raise DraftEditError(f"倉位比例不能超過 {MAX_POSITION_SIZE_PCT}%（保證金佔資金的比例）")
     return percent / Decimal(100)
+
+
+MAX_TAKE_PROFIT_TARGETS = 4
+
+
+def parse_take_profit_input(text: str) -> list[Decimal]:
+    """One or more take-profit prices separated by commas / spaces, e.g. `1.10, 1.05`.
+
+    The filled quantity is split equally across them (at most four), so order is kept as typed.
+    """
+    parts = [part for part in re.split(r"[,\s、，;；]+", text.strip()) if part]
+    if not parts:
+        raise DraftEditError("停利要是數字，例如 1.10 或 1.10, 1.05")
+    if len(parts) > MAX_TAKE_PROFIT_TARGETS:
+        raise DraftEditError(f"停利最多 {MAX_TAKE_PROFIT_TARGETS} 個")
+    return [_positive_decimal(part, label="停利") for part in parts]

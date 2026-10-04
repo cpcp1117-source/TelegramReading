@@ -30,8 +30,8 @@ the named, deliberate limitations, not silent gaps):
 - Dynamic protection/take-profit order resizing on additional partial
   fills (CS-BN-005) -- one `ProtectionOrder`/`TakeProfitOrder` per intent,
   sized to whatever was filled by the time polling stops.
-- Multiple take-profit levels -- only `trade_intent.take_profits[0]` is
-  ever used, for the full filled quantity.
+- (Multiple take-profit levels are supported since 2026-10-05: the filled quantity is split
+  equally across the targets, see `take_profit_plan.py`; the stop still covers the full quantity.)
 - System Pause wiring (FR-021) -- `system_control_state` is not built.
 - Production credentials/environment (FR-023) -- `environment` is always
   `'TESTNET'` (see config.py's `execution_environment`, hardcoded
@@ -77,6 +77,7 @@ from telegram_trader.models import (
 )
 from telegram_trader.outbox import append_outbox_event
 from telegram_trader.risk_engine import REASON_MAX_POSITIONS_REACHED, REASON_SYMBOL_CONFLICT
+from telegram_trader.take_profit_plan import plan_take_profit_levels
 
 LOGGER = logging.getLogger(__name__)
 
@@ -123,7 +124,7 @@ def close_side_for(side: str) -> str:
     return "SELL" if side == "LONG" else "BUY"
 
 
-def client_order_id_for(intent_id: str, purpose: str) -> str:
+def client_order_id_for(intent_id: str, purpose: str, level: int = 0) -> str:
     """Deterministic, well under Binance's `clientOrderId`/`clientAlgoId` length
 
     limits (36 and, empirically, shorter still -- kept to 26 chars total to
@@ -134,17 +135,20 @@ def client_order_id_for(intent_id: str, purpose: str) -> str:
     a second one.
     """
     prefix = _PURPOSE_PREFIXES[purpose]
-    digest = hashlib.sha256(f"{purpose}:{intent_id}".encode()).hexdigest()[:24]
+    # Level 0 hashes exactly as before multi-level take-profits existed (stable ids for old rows).
+    key = f"{purpose}:{intent_id}" if level == 0 else f"{purpose}:{level}:{intent_id}"
+    digest = hashlib.sha256(key.encode()).hexdigest()[:24]
     return f"{prefix}{digest}"
 
 
-def retry_client_order_id_for(intent_id: str, purpose: str) -> str:
+def retry_client_order_id_for(intent_id: str, purpose: str, level: int = 0) -> str:
     """The id for the single retry of a failed algo placement. Distinct from
     `client_order_id_for`'s (Binance may refuse to reuse a rejected
     `clientAlgoId`), still deterministic and the same 26-char length.
     """
     prefix = _PURPOSE_PREFIXES[purpose]
-    digest = hashlib.sha256(f"{purpose}:retry:{intent_id}".encode()).hexdigest()[:23]
+    key = f"{purpose}:retry:{intent_id}" if level == 0 else f"{purpose}:retry:{level}:{intent_id}"
+    digest = hashlib.sha256(key.encode()).hexdigest()[:23]
     return f"{prefix}r{digest}"
 
 
@@ -160,8 +164,11 @@ def _protection_row_id(intent_id: str) -> str:
     return hashlib.sha256(f"protection_order:{intent_id}".encode()).hexdigest()
 
 
-def _take_profit_row_id(intent_id: str) -> str:
-    return hashlib.sha256(f"take_profit_order:{intent_id}".encode()).hexdigest()
+def _take_profit_row_id(intent_id: str, level: int = 0) -> str:
+    key = (
+        f"take_profit_order:{intent_id}" if level == 0 else f"take_profit_order:{intent_id}:{level}"
+    )
+    return hashlib.sha256(key.encode()).hexdigest()
 
 
 def _fill_row_id(order_row_id: str, exchange_trade_id: int) -> str:
@@ -408,9 +415,12 @@ def _notify(
     (via `load_eligible_intents`'s "no lifecycle row yet" check) is this
     module's actual source of truth for "has this intent been acted on".
     """
+    # Several levels of one event type (take-profit 1/3, 2/3, ...) can be notified within the same
+    # clock tick, so the level is part of the id as well.
+    id_key = f"{event_type}:{payload['level']}" if "level" in payload else event_type
     append_audit_event(
         session,
-        event_id=_audit_event_id(intent_id, event_type, now),
+        event_id=_audit_event_id(intent_id, id_key, now),
         event_type=event_type,
         aggregate_type="trade_intent",
         aggregate_id=intent_id,
@@ -418,7 +428,7 @@ def _notify(
     )
     append_outbox_event(
         session,
-        event_id=_outbox_event_id(intent_id, event_type, now),
+        event_id=_outbox_event_id(intent_id, id_key, now),
         event_type=event_type,
         aggregate_type="trade_intent",
         aggregate_id=intent_id,
@@ -1116,23 +1126,37 @@ def _execute_one(
             )
         protection_summary = "stop FAILED -- position is UNPROTECTED, set a stop yourself"
 
-    # --- Take-profit (added 2026-09-29, explicit user request): best-effort, independent
-    # of the protection outcome above -- only the first take_profits value is used. ---
-    take_profit_summary = "no take-profit requested"
-    if trade_intent.take_profits:
-        target_price = round_price(Decimal(str(trade_intent.take_profits[0])), filters)
+    # --- Take-profit (2026-09-29, explicit user request; multi-level 2026-10-05): best-effort,
+    # independent of the protection outcome above. The filled quantity is split equally across
+    # the signal's targets (`plan_take_profit_levels`); each level is its own reduce-only order,
+    # placed, retried and notified on its own, so one failed level never blocks the others. ---
+    take_profit_summaries: list[str] = []
+    levels = plan_take_profit_levels(
+        [Decimal(str(value)) for value in (trade_intent.take_profits or [])],
+        filled_quantity,
+        filters,
+    )
+    level_count = len(levels)
+    for level in levels:
+        target_price = level.price
+        level_quantity = level.quantity
+        level_label = f"{level.index + 1}/{level_count}"
 
-        def place_take_profit(client_order_id: str) -> PlacementAttempt:
+        def place_take_profit(
+            client_order_id: str, *, qty: Decimal = level_quantity, price: Decimal = target_price
+        ) -> PlacementAttempt:
             return _place_and_confirm_take_profit(
                 trading_client,
                 symbol=symbol,
                 side=side,
                 client_order_id=client_order_id,
-                quantity=filled_quantity,
-                target_price=target_price,
+                quantity=qty,
+                target_price=price,
             )
 
-        def notify_take_profit_retrying(reason: str) -> None:
+        def notify_take_profit_retrying(
+            reason: str, *, price: Decimal = target_price, label: str = level_label
+        ) -> None:
             with session_factory.begin() as session:
                 _notify(
                     session,
@@ -1140,7 +1164,8 @@ def _execute_one(
                     event_type="execution_take_profit_retrying",
                     payload={
                         "symbol": symbol,
-                        "target_price": str(target_price),
+                        "level": label,
+                        "target_price": str(price),
                         "attempt": 1,
                         "reason": reason,
                     },
@@ -1151,8 +1176,10 @@ def _execute_one(
             _place_with_one_retry(
                 trading_client,
                 place_take_profit,
-                client_order_id=client_order_id_for(intent_id, "TAKE_PROFIT"),
-                retry_client_order_id=retry_client_order_id_for(intent_id, "TAKE_PROFIT"),
+                client_order_id=client_order_id_for(intent_id, "TAKE_PROFIT", level.index),
+                retry_client_order_id=retry_client_order_id_for(
+                    intent_id, "TAKE_PROFIT", level.index
+                ),
                 on_first_failure=notify_take_profit_retrying,
             )
         )
@@ -1161,15 +1188,16 @@ def _execute_one(
             session.execute(
                 pg_insert(TakeProfitOrder)
                 .values(
-                    take_profit_row_id=_take_profit_row_id(intent_id),
+                    take_profit_row_id=_take_profit_row_id(intent_id, level.index),
                     intent_id=intent_id,
+                    level_index=level.index,
                     exchange_order_id=None,
-                    target_quantity=filled_quantity,
+                    target_quantity=level_quantity,
                     target_price=target_price,
                     state="CONFIRMED" if take_profit_order is not None else "FAILED",
                     confirmed_at=clock() if take_profit_order is not None else None,
                 )
-                .on_conflict_do_nothing(index_elements=["intent_id"])
+                .on_conflict_do_nothing(index_elements=["intent_id", "level_index"])
             )
             if take_profit_order is not None:
                 _write_exchange_order(
@@ -1182,7 +1210,7 @@ def _execute_one(
                     side=close_side_for(side),
                     order_type="TAKE_PROFIT_MARKET",
                     reduce_only=True,
-                    requested_quantity=filled_quantity,
+                    requested_quantity=level_quantity,
                     requested_price=None,
                     requested_stop_price=target_price,
                     working_type="CONTRACT_PRICE",
@@ -1194,9 +1222,11 @@ def _execute_one(
                     submitted_at=clock(),
                     now=clock(),
                 )
-                take_profit_summary = f"take-profit confirmed @ {target_price}"
+                take_profit_summaries.append(
+                    f"take-profit {level_label} confirmed @ {target_price}"
+                )
             else:
-                take_profit_summary = f"take-profit FAILED @ {target_price}"
+                take_profit_summaries.append(f"take-profit {level_label} FAILED @ {target_price}")
             _notify(
                 session,
                 intent_id=intent_id,
@@ -1207,13 +1237,15 @@ def _execute_one(
                 ),
                 payload={
                     "symbol": symbol,
-                    "quantity": str(filled_quantity),
+                    "level": level_label,
+                    "quantity": str(level_quantity),
                     "target_price": str(target_price),
                     "attempt": take_profit_attempts,
                     "reason": take_profit_attempt.failure_reason,
                 },
                 now=clock(),
             )
+    take_profit_summary = "; ".join(take_profit_summaries) or "no take-profit requested"
 
     final_state = "PROTECTED" if protection_order is not None else "PROTECTION_FAILED"
     detail = f"{protection_summary}; {take_profit_summary}"

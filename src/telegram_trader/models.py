@@ -1057,7 +1057,7 @@ class TakeProfitOrder(Base):
 
     __tablename__ = "take_profit_order"
     __table_args__ = (
-        UniqueConstraint("intent_id", name="uq_take_profit_order_intent"),
+        UniqueConstraint("intent_id", "level_index", name="uq_take_profit_order_intent_level"),
         CheckConstraint(
             "state IN ('PENDING', 'CONFIRMED', 'FAILED')",
             name="ck_take_profit_order_state_valid",
@@ -1069,6 +1069,9 @@ class TakeProfitOrder(Base):
     intent_id: Mapped[str] = mapped_column(
         String(64), ForeignKey("trade_intent.intent_id", ondelete="CASCADE"), nullable=False
     )
+    # 0-based take-profit level (migration 0027): the intent's quantity is split across its
+    # targets, one row per level; level 0 is the first (nearest) target.
+    level_index: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     exchange_order_id: Mapped[str | None] = mapped_column(
         String(64), ForeignKey("exchange_order.order_row_id"), nullable=True
     )

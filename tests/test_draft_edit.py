@@ -9,6 +9,7 @@ from telegram_trader.draft_edit import (
     EntryEdit,
     parse_entry_input,
     parse_size_input,
+    parse_take_profit_input,
 )
 
 
@@ -45,3 +46,22 @@ def test_size_is_a_percentage_of_equity(text: str, expected: str) -> None:
 def test_bad_size_is_rejected(text: str) -> None:
     with pytest.raises(DraftEditError):
         parse_size_input(text)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("1.10", ["1.10"]),
+        ("1.10, 1.05", ["1.10", "1.05"]),
+        ("1.10 1.05  1.00", ["1.10", "1.05", "1.00"]),
+        ("1.10，1.05", ["1.10", "1.05"]),  # noqa: RUF001
+    ],
+)
+def test_take_profit_accepts_one_or_several_prices_in_order(text: str, expected: list[str]) -> None:
+    assert parse_take_profit_input(text) == [Decimal(v) for v in expected]
+
+
+@pytest.mark.parametrize("text", ["", "abc", "1.1, x", "0", "1 2 3 4 5"])
+def test_bad_take_profit_is_rejected(text: str) -> None:
+    with pytest.raises(DraftEditError):
+        parse_take_profit_input(text)
