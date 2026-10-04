@@ -191,6 +191,18 @@ def test_break_rule_needs_close_beyond_trigger_and_clamps_entry() -> None:
     assert result.entry_price == Decimal("1.18")  # clamped up into the zone
 
 
+def test_trigger_confirmed_long_ago_is_stale_not_a_draft() -> None:
+    candles = [_candle(0, "1.19", "1.195", "1.17", "1.18")]  # confirms at T0+15m; NOW is 24h later
+
+    stale = evaluate_candles(_state(), candles, now=NOW, max_trigger_age=timedelta(hours=1))
+    fresh = evaluate_candles(
+        _state(), candles, now=T0 + timedelta(minutes=30), max_trigger_age=timedelta(hours=1)
+    )
+
+    assert (stale.status, stale.reason, stale.events) == ("INVALIDATED", "TRIGGER_STALE", ())
+    assert fresh.status == "TRIGGERED"
+
+
 def test_stop_reached_before_entry_invalidates() -> None:
     result = evaluate_candles(_state(), [_candle(0, "1.2", "1.26", "1.19", "1.25")], now=NOW)
 

@@ -13,7 +13,7 @@ state and the closed candles it is handed.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
@@ -380,7 +380,13 @@ def _clamp(value: Decimal, zone: PriceZone) -> Decimal:
     return min(max(value, zone.low), zone.high)
 
 
-def evaluate_candles(state: SetupState, candles: list[Candle], *, now: datetime) -> SetupTransition:
+def evaluate_candles(
+    state: SetupState,
+    candles: list[Candle],
+    *,
+    now: datetime,
+    max_trigger_age: timedelta | None = None,
+) -> SetupTransition:
     """Replay closed candles (oldest first) against a `WATCHING`/`ZONE_TOUCHED` setup.
 
     Only candles that opened at or after `valid_from` and have already closed by `now` count --
@@ -422,6 +428,14 @@ def evaluate_candles(state: SetupState, candles: list[Candle], *, now: datetime)
             events.append("ZONE_TOUCHED")
 
         if status == "ZONE_TOUCHED" and _is_confirmed(state, candle):
+            if max_trigger_age is not None and now - candle.close_time > max_trigger_age:
+                # Confirmed long ago (e.g. the worker was down): the market has moved on, so a
+                # draft built from that candle would be stale. Close it instead of raising one.
+                return SetupTransition(
+                    status="INVALIDATED",
+                    reason="TRIGGER_STALE",
+                    last_candle_close_time=last_close_time,
+                )
             return SetupTransition(
                 status="TRIGGERED",
                 touched_at=touched_at,

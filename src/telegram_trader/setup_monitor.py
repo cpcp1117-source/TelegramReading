@@ -41,6 +41,7 @@ LOGGER = logging.getLogger(__name__)
 
 SETUP_PARSER_VERSION_PREFIX = "setup-"
 _SIGNAL_VALIDITY = timedelta(hours=6)
+_MAX_TRIGGER_AGE = timedelta(hours=1)
 _ACTIVE_STATUSES = ("WATCHING", "ZONE_TOUCHED")
 _INTERVAL_SECONDS = {"5m": 300, "15m": 900, "30m": 1800, "1h": 3600}
 
@@ -239,7 +240,9 @@ def run_setup_monitor(
                     - interval_seconds * 1000,
                     limit=1000,
                 )
-                transition = evaluate_candles(_state_of(setup), parse_candles(rows), now=now)
+                transition = evaluate_candles(
+                    _state_of(setup), parse_candles(rows), now=now, max_trigger_age=_MAX_TRIGGER_AGE
+                )
                 touched, triggered, closed = apply_transition(session, setup, transition, now)
                 checked += 1
                 touched_count += touched
