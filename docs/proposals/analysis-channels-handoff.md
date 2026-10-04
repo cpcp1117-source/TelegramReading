@@ -147,3 +147,9 @@
 - Execution Gateway 只用第一個停利（`take_profits[0]`），多個目標不會分批出場。
 - 主機要連資料庫：`compose.yaml` 的 `db` 沒有對主機開 port。
 - Monster 頻道仍走原本的規則解析，尚未處理「風險」字樣縮小倉位。
+
+## 9. 常駐執行（Windows 工作排程器）
+
+`powershell -File scripts\register-setup-worker-task.ps1` 會註冊工作 `TelegramTrader-SetupWorker`：登入時自動啟動、隱藏視窗、無時間限制、掛掉自動重啟；`-Remove` 可移除。執行腳本是 `scripts/run-setup-worker.ps1`，日誌在 `logs/setup-worker.log`（超過 20MB 輪替）。前提：資料庫要用 `compose.host-db.yaml` 對本機開 port，`codex` 保持登入。
+
+注意：工作排程器的指令列會弄壞含中文的專案路徑，所以工作指向 `%USERPROFILE%\.telegram-trader\` 下的 ASCII 轉接腳本；不能放在 AppData（桌面 App 的 AppData 是虛擬化的，排程工作看不到）。
