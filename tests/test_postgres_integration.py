@@ -66,7 +66,7 @@ from telegram_trader.openai_client import OpenAiClientError
 from telegram_trader.outbox import OutboxConsumer, append_outbox_event
 from telegram_trader.parse_signals import SignalParsingResult, run_signal_parsing
 from telegram_trader.position_monitor import run_position_monitor
-from telegram_trader.retention_cleanup import run_retention_cleanup
+from telegram_trader.retention_cleanup import retention_migration_applied, run_retention_cleanup
 from telegram_trader.signal_decisions import (
     create_edit,
     create_request,
@@ -470,7 +470,7 @@ def test_channel_policy_round_trip_including_jsonb_fields(engine: Engine) -> Non
         assert row.allowed_symbols == ["BTCUSDT", "ETHUSDT"]
         assert row.policy_detail == {"thesis_structure": "resistance then support"}
         assert row.automation_authorization == "UNKNOWN"
-        assert row.raw_retention_days == 7
+        assert row.raw_retention_days == 60
 
 
 def test_channel_policy_rejects_invalid_channel_type(engine: Engine) -> None:
@@ -3216,3 +3216,77 @@ def test_console_theses_and_audit(engine: Engine) -> None:
             page,
         )
         assert future["total"] == 0
+
+
+# ---------------------------------------------------------------- Two-month retention (0022)
+
+
+def test_retention_cleanup_keeps_message_whose_signal_led_to_an_order(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    intent = _open_protected_position(factory, 970)
+    with factory.begin() as session:
+        session.execute(
+            text("UPDATE channel_policies SET raw_retention_days = 1 WHERE channel_id = 970")
+        )
+    far_future = datetime.now(UTC) + timedelta(days=365)
+
+    run_retention_cleanup(factory, MediaStore(Path("media")), now=lambda: far_future)
+
+    with factory() as session:
+        kept = session.get(TradeIntentRow, intent.intent_id)
+        assert kept is not None
+        signal = session.get(NormalizedSignalRow, kept.signal_row_id)
+        assert signal is not None
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(TelegramMessageVersion)
+                .where(TelegramMessageVersion.source_event_id == signal.raw_message_id)
+            )
+            == 1
+        )
+        assert session.scalar(
+            select(func.count())
+            .select_from(OrderLifecycle)
+            .where(OrderLifecycle.intent_id == intent.intent_id)
+        )
+
+
+def test_retention_migration_guard_sees_0022(engine: Engine) -> None:
+    assert retention_migration_applied(create_session_factory(engine))
+
+
+def test_trade_intent_with_orders_cannot_be_deleted(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    intent = _open_protected_position(factory, 971)
+
+    with pytest.raises(DBAPIError, match="has order records"), factory.begin() as session:
+        session.execute(
+            text("DELETE FROM trade_intent WHERE intent_id = :id"), {"id": intent.intent_id}
+        )
+
+
+def test_retention_cleanup_deletes_risk_rejected_intent_without_orders(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    _approve_signal(factory, 972)
+    run_risk_evaluation(
+        factory,
+        settings=_risk_settings(),
+        market_data_client=_FakeRiskMarketDataClient(None),
+        clock=lambda: RISK_NOW,
+    )
+    with factory() as session:
+        intent = session.scalar(select(TradeIntentRow).where(TradeIntentRow.channel_id == 972))
+        assert intent is not None
+        assert intent.status == "RISK_REJECTED"
+    with factory.begin() as session:
+        session.execute(
+            text("UPDATE channel_policies SET raw_retention_days = 1 WHERE channel_id = 972")
+        )
+
+    run_retention_cleanup(
+        factory, MediaStore(Path("media")), now=lambda: datetime.now(UTC) + timedelta(days=365)
+    )
+
+    with factory() as session:
+        assert session.get(TradeIntentRow, intent.intent_id) is None

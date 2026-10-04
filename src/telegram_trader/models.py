@@ -271,7 +271,7 @@ class ChannelPolicy(Base):
     supported_content_types: Mapped[list[str]] = mapped_column(
         JSONB, nullable=False, server_default="[]"
     )
-    raw_retention_days: Mapped[int] = mapped_column(Integer, nullable=False, server_default="7")
+    raw_retention_days: Mapped[int] = mapped_column(Integer, nullable=False, server_default="60")
     gate_decision: Mapped[str] = mapped_column(String(20), nullable=False)
     policy_detail: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default="{}"

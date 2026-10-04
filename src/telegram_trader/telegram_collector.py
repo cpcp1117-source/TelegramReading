@@ -21,6 +21,7 @@ from telegram_trader.channel_policy import (
 from telegram_trader.config import TelegramChannelTarget, get_settings
 from telegram_trader.db import create_db_engine, create_session_factory
 from telegram_trader.logging_config import configure_logging
+from telegram_trader.retention_cleanup import run_retention_forever
 from telegram_trader.telegram_readonly import create_client
 from telegram_trader.telegram_storage import (
     ForwardOriginType,
@@ -384,9 +385,10 @@ async def _run(once: bool) -> int:
         )
 
     client = create_client(settings)
+    media_store = MediaStore(Path("media"))
     sink = TelegramMessageProcessor(
         session_factory,
-        MediaStore(Path("media")),
+        media_store,
         frozenset(target.identity for target in effective_targets),
     )
     collector = TelethonReadOnlyCollector(
@@ -398,11 +400,21 @@ async def _run(once: bool) -> int:
         if once:
             await collector.run_connection()
         else:
-            await collector.run_forever(
-                policy_session_factory=session_factory,
-                policy_full_targets=settings.telegram_target_channels,
-                policy_poll_interval_seconds=settings.policy_poll_interval_seconds,
+            # Raw messages past each channel's retention (60 days) are deleted daily,
+            # together with the signals and approvals derived from them.
+            retention_task = asyncio.create_task(
+                run_retention_forever(session_factory, media_store)
             )
+            try:
+                await collector.run_forever(
+                    policy_session_factory=session_factory,
+                    policy_full_targets=settings.telegram_target_channels,
+                    policy_poll_interval_seconds=settings.policy_poll_interval_seconds,
+                )
+            finally:
+                retention_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await retention_task
         return 0
     finally:
         await client.disconnect()
