@@ -171,6 +171,12 @@ class TelegramMessageProcessor:
         self._media_store = media_store
         self._expected_targets = expected_targets
 
+    def set_expected_targets(self, expected_targets: frozenset[tuple[int, int | None]]) -> None:
+        """Widen/narrow the allowlist when the collector picks up a channel change."""
+        if not expected_targets:
+            raise ValueError("at least one expected target is required")
+        self._expected_targets = expected_targets
+
     def checkpoint(self, channel_id: int, topic_id: int | None = None) -> int:
         with self._session_factory() as session:
             checkpoint = session.get(

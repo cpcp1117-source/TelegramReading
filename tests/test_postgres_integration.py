@@ -16,8 +16,8 @@ from sqlalchemy import Engine, event, func, select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
+from telegram_trader import channel_admin, runtime_settings
 from telegram_trader import cli as cli_module
-from telegram_trader import runtime_settings
 from telegram_trader.binance_market_data import (
     compute_snapshot_id,
     load_latest_snapshot,
@@ -29,6 +29,7 @@ from telegram_trader.channel_policy import (
     evaluate_raw_collection,
     load_channel_policies,
     resolve_effective_targets,
+    targets_with_policies,
 )
 from telegram_trader.config import Settings, TelegramChannelTarget, get_settings
 from telegram_trader.control_bot import (
@@ -3642,3 +3643,131 @@ def test_runtime_setting_changes_are_append_only(engine: Engine) -> None:
         )
     with pytest.raises(DBAPIError, match="append-only"), factory.begin() as session:
         session.execute(text("DELETE FROM runtime_setting_changes"))
+
+
+# ---------------------------------------------------------------- Channel admin (step 5)
+
+
+def _channel_form(**overrides: object) -> dict[str, object]:
+    values: dict[str, object] = {
+        "channel_id": "-100970000001",
+        "topic_id": "0",
+        "label": "Web added",
+        "username": "",
+        "channel_type": "ANALYSIS",
+        "gate_decision": "MONITOR_ONLY",
+        "access_authorization": "GRANTED",
+        "automation_authorization": "GRANTED",
+        "ai_authorization": "PENDING",
+        "media_authorization": "UNKNOWN",
+        "symbol_scope_mode": "BINANCE_USDM_ACTIVE_PERPETUAL",
+        "allowed_symbols": "",
+        "prohibited_symbols": "",
+        "message_languages": "zh-TW",
+        "supported_content_types": ["TEXT"],
+        "raw_retention_days": "60",
+        "acceptance_owner": "User",
+    }
+    values.update(overrides)
+    return values
+
+
+def test_channel_admin_create_update_remove_with_audit(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    now = datetime(2026, 10, 5, 9, 0, tzinfo=UTC)
+    with factory.begin() as session:
+        created = channel_admin.create_channel(session, _channel_form(), actor="admin", now=now)
+        assert (created.channel_id, created.topic_id) == (970000001, 0)
+    with pytest.raises(channel_admin.ChannelValueError, match="已經存在"), factory.begin() as s:
+        channel_admin.create_channel(s, _channel_form(), actor="admin", now=now)
+
+    with factory.begin() as session:
+        unchanged = channel_admin.update_channel(
+            session, 970000001, 0, _channel_form(), actor="admin", now=now
+        )
+        changed = channel_admin.update_channel(
+            session,
+            970000001,
+            0,
+            _channel_form(ai_authorization="GRANTED", gate_decision="REJECTED"),
+            actor="admin",
+            now=now,
+        )
+    assert unchanged == []
+    assert {(c["field"], c["from"], c["to"]) for c in changed} == {
+        ("ai_authorization", "PENDING", "GRANTED"),
+        ("gate_decision", "MONITOR_ONLY", "REJECTED"),
+    }
+    with pytest.raises(LookupError), factory.begin() as session:
+        channel_admin.update_channel(session, 1, 0, _channel_form(), actor="admin", now=now)
+
+    with factory() as session:
+        rows = {r["channel_id"]: r for r in channel_admin.list_channel_policies(session)}
+        audit = session.scalars(
+            select(AuditEvent)
+            .where(AuditEvent.aggregate_type == "channel_policy")
+            .order_by(AuditEvent.recorded_at)
+        ).all()
+    assert rows[970000001]["gate_decision"] == "REJECTED"
+    assert rows[970000001]["last_message_at"] is None
+    assert [a.event_type for a in audit] == ["channel_policy_created", "channel_policy_updated"]
+    assert audit[1].payload["actor"] == "admin"
+
+
+@pytest.mark.anyio
+async def test_collector_picks_up_channel_added_from_web(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    configured = TelegramChannelTarget(channel_id=562, topic_id=None, username=None, label="Cfg")
+    with factory.begin() as session:
+        session.add(
+            _channel_policy(
+                channel_id=562,
+                topic_id=0,
+                automation_authorization="GRANTED",
+                gate_decision="ENABLED",
+            )
+        )
+        channel_admin.create_channel(
+            session,
+            _channel_form(channel_id="970000002", topic_id="7", label="Web topic"),
+            actor="admin",
+            now=datetime(2026, 10, 5, tzinfo=UTC),
+        )
+        channel_admin.create_channel(
+            session,
+            _channel_form(channel_id="970000003", label="Paused", gate_decision="PAUSED"),
+            actor="admin",
+            now=datetime(2026, 10, 5, tzinfo=UTC),
+        )
+
+    with factory() as session:
+        candidates = targets_with_policies(session, [configured])
+    assert [(t.channel_id, t.topic_id, t.label) for t in candidates] == [
+        (562, None, "Cfg"),
+        (970000002, 7, "Web topic"),
+        (970000003, None, "Paused"),
+    ]
+
+    class _Client:
+        disconnects = 0
+
+        async def disconnect(self) -> None:
+            self.disconnects += 1
+
+    class _Sink:
+        expected: frozenset[tuple[int, int | None]] = frozenset()
+
+        def set_expected_targets(self, expected: frozenset[tuple[int, int | None]]) -> None:
+            self.expected = expected
+
+    client, sink = _Client(), _Sink()
+    collector = TelethonReadOnlyCollector(client, sink, targets=[configured])  # type: ignore[arg-type]
+
+    removed = await collector.reload_policy_once(factory, [configured])
+
+    assert removed == []
+    assert [t.channel_id for t in collector._targets] == [562, 970000002]  # paused one skipped
+    assert sink.expected == {(562, None), (970000002, 7)}
+    assert client.disconnects == 1
+    assert await collector.reload_policy_once(factory, [configured]) == []
+    assert client.disconnects == 1  # already collecting: no second reconnect

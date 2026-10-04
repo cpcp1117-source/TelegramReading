@@ -5,7 +5,7 @@ const PAGE_SIZE = 50;
 const PAGES = {
   overview: { title: "總覽", render: renderOverview },
   risk: { title: "風險參數", render: (c) => renderSettings(c, "risk") },
-  channels: { title: "頻道授權與設定" },
+  channels: { title: "頻道授權與設定", render: renderChannels },
   "analysis-monitor": { title: "分析頻道監控參數" },
   runtime: { title: "運作參數", render: (c) => renderSettings(c, "runtime") },
   signals: { title: "訊號與核准記錄", render: renderSignals },
@@ -1024,6 +1024,164 @@ async function renderSettings(container, group) {
   }
 
   draw(await api(`/api/settings/${group}`));
+}
+
+// ---------------------------------------------------------------- channels
+
+const GATE_TONE = { MONITOR_ONLY: "good", ENABLED: "good", PAUSED: "warn", REJECTED: "bad" };
+const AUTH_TONE = { GRANTED: "good", PENDING: "warn", UNKNOWN: "", REVOKED: "bad" };
+const AUTH_FIELDS = [
+  ["access_authorization", "讀取內容", "這個帳號是否可以讀取頻道內容"],
+  ["automation_authorization", "自動收集", "是否允許自動收集訊息；不是「已授權」就不會收集"],
+  ["ai_authorization", "AI 處理", "是否允許把訊息文字交給 AI 整理（分析草稿、分析情境）"],
+  ["media_authorization", "圖片儲存", "是否允許儲存圖片，以及處理含未審核圖片的訊息"],
+];
+const CONTENT_LABELS = { TEXT: "文字", CAPTION: "圖片說明", IMAGE: "圖片" };
+
+function choiceBadge(choices, tones, value) {
+  return el("span", { class: `badge ${tones[value] || ""}` }, choices[value] || value);
+}
+
+async function renderChannels(container) {
+  const data = await api("/api/channel-policies");
+  const c = data.choices;
+  const showRemoved = el("input", { type: "checkbox" });
+  const list = el("div");
+  container.append(
+    el("p", { class: "note" }, "頻道設定存在資料庫，collector 每 5 分鐘重新讀取：新增或恢復的頻道會自動開始收集（不用重啟），暫停或移除的會停止收集。新增前請確認收集用的 Telegram 帳號已經加入該頻道。"),
+    el("div", { class: "filters" }, [
+      el("button", { type: "button", class: "primary", onclick: () => openDrawer("新增頻道", () => channelForm(c, null)) }, "＋ 新增頻道"),
+      el("label", { class: "inline-check" }, [showRemoved, "顯示已移除的頻道"]),
+    ]),
+    list,
+  );
+  function draw() {
+    const rows = data.items.filter((r) => showRemoved.checked || r.gate_decision !== "REJECTED");
+    list.replaceChildren(table([
+      { title: "名稱", key: "label", wrap: true },
+      { title: "頻道 ID / 討論串", render: (r) => `${r.channel_id}${r.topic_id ? ` / ${r.topic_id}` : ""}` },
+      { title: "類型", render: (r) => c.channel_types[r.channel_type] },
+      { title: "狀態", render: (r) => choiceBadge(c.gate_decisions, GATE_TONE, r.gate_decision) },
+      {
+        title: "授權",
+        // Short names, colored by status; the full status is in the hover title.
+        render: (r) => el("span", { class: "auth-dots" }, AUTH_FIELDS.map(([f, name]) =>
+          el("span", { class: `badge ${AUTH_TONE[r[f]] || ""}`, title: `${name}：${c.authorizations[r[f]]}` },
+            `${name.slice(0, 2)}${r[f] === "GRANTED" ? "✓" : r[f] === "REVOKED" ? "✗" : "?"}`))),
+      },
+      { title: "幣種範圍", render: (r) => (r.symbol_scope_mode === "STATIC_ALLOWLIST" ? r.allowed_symbols.join("、") : "全部永續合約") },
+      { title: "最後收到訊息", render: (r) => fmtTime(r.last_message_at) },
+      { title: "已存訊息", key: "stored_messages", num: true },
+    ], rows, (row) => openDrawer(row.label, () => channelForm(c, row)), "還沒有任何頻道"));
+  }
+  showRemoved.addEventListener("change", draw);
+  draw();
+}
+
+function channelForm(c, row) {
+  const isNew = row === null;
+  const value = (field, fallback) => (row ? row[field] : fallback);
+  const form = el("form", { class: "channel-form" });
+  const field = (labelText, input, hint) =>
+    el("label", { class: "form-field" }, [el("span", { class: "form-label" }, labelText), input, hint ? el("span", { class: "muted small" }, hint) : null]);
+  const select = (name, choices, current) => {
+    const node = el("select", { name });
+    for (const [k, v] of Object.entries(choices)) node.append(el("option", { value: k, selected: k === current }, v));
+    return node;
+  };
+  const text = (name, current, attrs = {}) => el("input", { name, value: current ?? "", ...attrs });
+
+  if (isNew) {
+    form.append(
+      el("h3", {}, "頻道識別"),
+      field("頻道 ID", text("channel_id", "", { required: true, placeholder: "例如 -1002439599598 或 2439599598" }), "可以直接貼 Telegram 顯示的 -100 開頭 ID"),
+      field("討論串 ID", text("topic_id", "0", { inputmode: "numeric" }), "群組只收某個討論串時填它的 ID；整個頻道填 0"),
+    );
+  } else {
+    form.append(kv([
+      ["頻道 ID", String(row.channel_id)],
+      ["討論串 ID", row.topic_id ? String(row.topic_id) : "整個頻道"],
+      ["建立時間", fmtTime(row.created_at)],
+      ["最後修改", fmtTime(row.updated_at)],
+      ["最後收到訊息", fmtTime(row.last_message_at)],
+    ]));
+  }
+  form.append(
+    el("h3", {}, "基本設定"),
+    field("名稱", text("label", value("label", ""), { required: true, maxlength: "200" })),
+    field("公開帳號", text("username", value("username", ""), { placeholder: "例如 followgerry（不含 @）" }), "私人頻道留空"),
+    field("頻道類型", select("channel_type", c.channel_types, value("channel_type", "ANALYSIS")), "下單訊號頻道會解析成訊號請你核准；分析頻道交給 AI 整理"),
+    field("狀態", select("gate_decision", c.gate_decisions, value("gate_decision", "MONITOR_ONLY")), "「監看中」與「啟用」目前效果相同，都會收集；「暫停」與「已移除」不收集"),
+    el("h3", {}, "授權"),
+  );
+  for (const [f, name, hint] of AUTH_FIELDS) {
+    form.append(field(name, select(f, c.authorizations, value(f, "UNKNOWN")), hint));
+  }
+  const scope = select("symbol_scope_mode", c.symbol_scopes, value("symbol_scope_mode", "BINANCE_USDM_ACTIVE_PERPETUAL"));
+  const contentBoxes = c.content_types.map((t) =>
+    el("label", { class: "inline-check" }, [
+      el("input", { type: "checkbox", name: "supported_content_types", value: t, checked: (value("supported_content_types", ["TEXT", "CAPTION"]) || []).includes(t) }),
+      CONTENT_LABELS[t] || t,
+    ]));
+  form.append(
+    el("h3", {}, "內容與幣種"),
+    field("幣種範圍", scope),
+    field("允許幣種", text("allowed_symbols", (value("allowed_symbols", []) || []).join(", ")), "「只限指定幣種」時必填，用逗號分隔，例如 BTCUSDT, ETHUSDT"),
+    field("排除幣種", text("prohibited_symbols", (value("prohibited_symbols", []) || []).join(", ")), "這些幣種一律不處理"),
+    field("訊息語言", text("message_languages", (value("message_languages", ["zh-TW"]) || []).join(", ")), "例如 zh-TW, en"),
+    el("div", { class: "form-field" }, [el("span", { class: "form-label" }, "內容類型"), el("div", { class: "check-row" }, contentBoxes)]),
+    field("原始訊息保留天數", text("raw_retention_days", value("raw_retention_days", 60), { type: "number", min: "1", max: "3650" }), "超過天數的原始訊息與衍生的訊號、核准會每天自動刪除（有開單的保留）"),
+    el("h3", {}, "授權紀錄"),
+    field("授權確認人", text("acceptance_owner", value("acceptance_owner", "User"))),
+    field("授權確認日期", text("acceptance_date", value("acceptance_date", ""), { type: "date" })),
+    field("說明文件路徑", text("onboarding_doc_path", value("onboarding_doc_path", ""), { placeholder: "docs/phase-0/channels/….md" })),
+  );
+
+  const status = el("div", { class: "save-status", role: "status" });
+  const readForm = () => {
+    const fd = new FormData(form);
+    const body = Object.fromEntries([...fd.entries()].filter(([k]) => k !== "supported_content_types"));
+    body.supported_content_types = fd.getAll("supported_content_types");
+    return body;
+  };
+  async function submit(body, confirmText) {
+    if (confirmText && !window.confirm(confirmText)) return;
+    status.classList.remove("bad");
+    status.textContent = "儲存中…";
+    try {
+      if (isNew) {
+        await api("/api/channel-policies", { method: "POST", body: JSON.stringify(body) });
+      } else {
+        const result = await api(`/api/channel-policies/${row.channel_id}/${row.topic_id}`, { method: "PUT", body: JSON.stringify(body) });
+        if (!result.changes.length) {
+          status.textContent = "沒有任何變更";
+          return;
+        }
+      }
+      channelCache = null; // other pages' channel filters
+      closeDrawer();
+      route();
+    } catch (error) {
+      status.textContent = error.message;
+      status.classList.add("bad");
+    }
+  }
+  const buttons =[el("button", { type: "submit", class: "primary" }, isNew ? "新增頻道" : "儲存變更")];
+  if (!isNew && row.gate_decision !== "REJECTED") {
+    buttons.push(el("button", {
+      type: "button",
+      class: "danger",
+      onclick: () => submit({ ...readForm(), gate_decision: "REJECTED" }, `確定要移除「${row.label}」？\n\n會停止收集這個頻道；已收集的資料照保留天數清除。之後可以把狀態改回「監看中」恢復。`),
+    }, "移除頻道"));
+  }
+  form.append(el("div", { class: "save-bar" }, [...buttons, status]));
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const body = readForm();
+    const turningOn = body.automation_authorization === "GRANTED" && ["MONITOR_ONLY", "ENABLED"].includes(body.gate_decision);
+    submit(body, isNew && turningOn ? `新增「${body.label}」後，collector 會在 5 分鐘內開始收集。\n請確認收集用的 Telegram 帳號已加入這個頻道。` : null);
+  });
+  return form;
 }
 
 // ---------------------------------------------------------------- router

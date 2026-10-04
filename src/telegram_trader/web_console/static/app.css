@@ -461,3 +461,48 @@ input.changed { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(47, 111,
 
 .save-bar input { max-width: 380px; }
 .save-status { font-size: 13px; color: var(--muted); }
+
+/* ---------- channel form ---------- */
+
+.channel-form h3:first-child { margin-top: 0; }
+
+.form-field {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  gap: 4px 14px;
+  align-items: center;
+  margin: 10px 0;
+}
+
+.form-field .small { grid-column: 2; }
+.form-label { color: var(--muted); font-size: 13px; }
+
+.form-field select,
+.form-field input:not([type="checkbox"]) {
+  font: inherit;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  width: 100%;
+}
+
+.check-row { display: flex; gap: 16px; flex-wrap: wrap; }
+
+.inline-check {
+  display: inline-flex;
+  flex-direction: row !important;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.inline-check input { width: auto; }
+
+.auth-dots { display: inline-flex; gap: 4px; }
+
+button.danger { color: var(--bad); border-color: var(--bad); }
+.save-status.bad { color: var(--bad); }
+.filters input[type="checkbox"] { min-width: 0; }

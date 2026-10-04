@@ -115,3 +115,28 @@ def resolve_effective_targets(
     if not effective:
         raise ChannelPolicyError("no configured Telegram target is authorized for raw collection")
     return effective
+
+
+def targets_with_policies(
+    session: Session, config_targets: list[TelegramChannelTarget]
+) -> list[TelegramChannelTarget]:
+    """The configured targets plus every channel added in `channel_policies` (Web Console).
+
+    A configured target keeps its own label/username; a policy-only row becomes a
+    target built from the row. Whether each one may be collected is still decided
+    by `filter_authorized_targets` -- this only widens what is considered.
+    """
+    known = {_policy_key(target.channel_id, target.topic_id) for target in config_targets}
+    extra = [
+        TelegramChannelTarget(
+            channel_id=row.channel_id,
+            topic_id=row.topic_id or None,
+            username=row.username,
+            label=row.label,
+        )
+        for row in session.scalars(
+            select(ChannelPolicy).order_by(ChannelPolicy.created_at, ChannelPolicy.channel_id)
+        )
+        if (row.channel_id, row.topic_id) not in known
+    ]
+    return [*config_targets, *extra]

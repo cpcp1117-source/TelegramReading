@@ -17,6 +17,7 @@ from telegram_trader.channel_policy import (
     filter_authorized_targets,
     load_channel_policies,
     resolve_effective_targets,
+    targets_with_policies,
 )
 from telegram_trader.config import TelegramChannelTarget, get_settings
 from telegram_trader.db import create_db_engine, create_session_factory
@@ -174,22 +175,45 @@ class TelethonReadOnlyCollector:
         self._clock = clock or (lambda: datetime.now(UTC))
 
     async def resolve_targets(self) -> dict[int, Any]:
-        """Resolve one entity per distinct channel_id across all configured targets."""
+        """Resolve one entity per distinct channel_id across all configured targets.
+
+        A channel that cannot be resolved (wrong ID, account not a member, an ID
+        that resolves to a different channel) is skipped for this connection and
+        logged, so one bad channel added from the Web Console cannot stop the
+        others. Only when nothing resolves does this raise.
+        """
         await self._client.get_dialogs()
         entities: dict[int, Any] = {}
+        failures: dict[int, str] = {}
         for target in self._targets:
-            if target.channel_id in entities:
+            if target.channel_id in entities or target.channel_id in failures:
                 continue
-            if target.username:
-                entity = await self._client.get_entity(target.username)
-            else:
-                entity = await self._client.get_entity(PeerChannel(target.channel_id))
-            if int(entity.id) != target.channel_id:
-                raise ValueError(
-                    f"resolved Telegram entity does not match allowlisted channel ID "
-                    f"{target.channel_id}"
+            try:
+                if target.username:
+                    entity = await self._client.get_entity(target.username)
+                else:
+                    entity = await self._client.get_entity(PeerChannel(target.channel_id))
+                if int(entity.id) != target.channel_id:
+                    raise ValueError(
+                        f"resolved Telegram entity does not match allowlisted channel ID "
+                        f"{target.channel_id}"
+                    )
+            except Exception as error:
+                failures[target.channel_id] = str(error) or type(error).__name__
+                LOGGER.warning(
+                    "telegram channel could not be resolved; skipping it",
+                    extra={
+                        "context": {
+                            "channel_id": target.channel_id,
+                            "label": target.label,
+                            "error": failures[target.channel_id],
+                        }
+                    },
                 )
+                continue
             entities[target.channel_id] = entity
+        if not entities:
+            raise ValueError(next(iter(failures.values()), "no Telegram target to resolve"))
         return entities
 
     def _matching_target(
@@ -243,6 +267,8 @@ class TelethonReadOnlyCollector:
         self._client.add_event_handler(on_edit, edit_builder)
         try:
             for target in self._targets:
+                if target.channel_id not in entities:
+                    continue
                 backfilled = await self.backfill(target, entities[target.channel_id])
                 LOGGER.info(
                     "telegram collector ready",
@@ -274,6 +300,26 @@ class TelethonReadOnlyCollector:
             self._targets = [target for target in self._targets if target.identity in authorized]
         return removed
 
+    async def _add_targets(self, added: list[TelegramChannelTarget]) -> None:
+        """Start collecting newly authorized channels: widen the allowlist, then
+        reconnect so `run_connection` resolves and backfills them."""
+        self._targets = [*self._targets, *added]
+        set_expected = getattr(self._sink, "set_expected_targets", None)
+        if set_expected is not None:
+            set_expected(frozenset(target.identity for target in self._targets))
+        for target in added:
+            LOGGER.warning(
+                "channel policy authorized a new target; reconnecting to collect it",
+                extra={
+                    "context": {
+                        "channel_id": target.channel_id,
+                        "topic_id": target.topic_id,
+                        "label": target.label,
+                    }
+                },
+            )
+        await self._client.disconnect()
+
     async def reload_policy_once(
         self,
         session_factory: sessionmaker[Session],
@@ -285,9 +331,14 @@ class TelethonReadOnlyCollector:
         the poll loop is responsible for catching and retrying a DB error.
         """
         with session_factory() as session:
-            policies = load_channel_policies(session, list(full_targets))
-        authorized = filter_authorized_targets(list(full_targets), policies, LOGGER)
+            candidates = targets_with_policies(session, list(full_targets))
+            policies = load_channel_policies(session, candidates)
+        authorized = filter_authorized_targets(candidates, policies, LOGGER)
         removed = self._apply_policy_reload(frozenset(target.identity for target in authorized))
+        active = {target.identity for target in self._targets}
+        added = [target for target in authorized if target.identity not in active]
+        if added:
+            await self._add_targets(added)
         for target in removed:
             LOGGER.warning(
                 "channel policy revoked target mid-session; excluding without restart",
@@ -380,8 +431,9 @@ async def _run(once: bool) -> int:
     session_factory = create_session_factory(engine)
 
     with session_factory() as session:
+        # Channels added from the Web Console live only in channel_policies.
         effective_targets = resolve_effective_targets(
-            session, settings.telegram_target_channels, LOGGER
+            session, targets_with_policies(session, settings.telegram_target_channels), LOGGER
         )
 
     client = create_client(settings)

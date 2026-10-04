@@ -446,3 +446,35 @@ def test_settings_save_reports_validation_errors(
 
     assert response.status_code == 400
     assert response.json()["detail"] == "leverage out of range"
+
+
+def test_channel_policy_routes_map_errors(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from contextlib import nullcontext
+
+    from sqlalchemy.orm import Session
+
+    from telegram_trader import channel_admin
+
+    monkeypatch.setattr(Session, "begin", lambda _self: nullcontext())
+    monkeypatch.setattr(channel_admin, "list_channel_policies", lambda _s: [{"label": "x"}])
+
+    def bad_create(*_args: Any, **_kwargs: Any) -> Any:
+        raise channel_admin.ChannelValueError("duplicate channel")
+
+    def missing(*_args: Any, **_kwargs: Any) -> Any:
+        raise LookupError
+
+    monkeypatch.setattr(channel_admin, "create_channel", bad_create)
+    monkeypatch.setattr(channel_admin, "update_channel", missing)
+    assert client.get("/api/channel-policies").status_code == 401
+    _login(client)
+
+    listing = client.get("/api/channel-policies").json()
+    assert listing["items"] == [{"label": "x"}]
+    assert "GRANTED" in listing["choices"]["authorizations"]
+    created = client.post("/api/channel-policies", json={"channel_id": "1"})
+    assert created.status_code == 400
+    assert created.json()["detail"] == "duplicate channel"
+    assert client.put("/api/channel-policies/1/0", json={}).status_code == 404

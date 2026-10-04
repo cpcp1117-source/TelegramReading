@@ -370,3 +370,49 @@ def test_reconnect_delay_is_exponential_and_capped() -> None:
     assert reconnect_delay(20) == 60
     with pytest.raises(ValueError, match="negative"):
         reconnect_delay(-1)
+
+
+@pytest.mark.anyio
+async def test_one_unresolvable_channel_is_skipped_not_fatal() -> None:
+    client = FakeClient()
+    real_get_entity = client.get_entity
+
+    async def get_entity(target: object) -> FakeEntity:
+        if target == "followgerry":
+            raise ValueError("Cannot find any entity corresponding to followgerry")
+        return await real_get_entity(target)
+
+    client.get_entity = get_entity  # type: ignore[method-assign]
+    collector = TelethonReadOnlyCollector(
+        client, FakeSink(), targets=[FOLLOWGERRY_TARGET, BTC_ETH_TOPIC_TARGET], clock=lambda: NOW
+    )
+
+    entities = await collector.resolve_targets()
+
+    assert list(entities) == [2382278102]
+    await collector.run_connection()  # backfills only the resolved channel, no KeyError
+
+
+@pytest.mark.anyio
+async def test_add_targets_widens_sink_allowlist_and_reconnects() -> None:
+    class Sink(FakeSink):
+        expected: frozenset[tuple[int, int | None]] = frozenset()
+
+        def set_expected_targets(self, expected: frozenset[tuple[int, int | None]]) -> None:
+            self.expected = expected
+
+    client = FakeClient()
+    disconnects: list[bool] = []
+
+    async def disconnect() -> None:
+        disconnects.append(True)
+
+    client.disconnect = disconnect  # type: ignore[attr-defined]
+    sink = Sink()
+    collector = TelethonReadOnlyCollector(client, sink, targets=[FOLLOWGERRY_TARGET])
+
+    await collector._add_targets([BTC_ETH_TOPIC_TARGET])
+
+    assert collector._targets == [FOLLOWGERRY_TARGET, BTC_ETH_TOPIC_TARGET]
+    assert sink.expected == {FOLLOWGERRY_TARGET.identity, BTC_ETH_TOPIC_TARGET.identity}
+    assert disconnects == [True]

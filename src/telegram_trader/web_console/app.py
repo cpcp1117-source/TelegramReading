@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from telegram_trader import runtime_settings
+from telegram_trader import channel_admin, runtime_settings
 from telegram_trader.audit import append_audit_event
 from telegram_trader.binance_market_data import BinanceMarketDataClient, fetch_mark_price
 from telegram_trader.config import Settings
@@ -313,6 +313,65 @@ def create_app(
                 status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)
             ) from error
         return {"changes": diffs, **settings_page(session, group)}
+
+    def channel_choices() -> dict[str, Any]:
+        return {
+            "channel_types": channel_admin.CHANNEL_TYPES,
+            "authorizations": channel_admin.AUTHORIZATIONS,
+            "gate_decisions": channel_admin.GATE_DECISIONS,
+            "symbol_scopes": channel_admin.SYMBOL_SCOPES,
+            "content_types": list(channel_admin.CONTENT_TYPES),
+        }
+
+    def channel_error(error: channel_admin.ChannelValueError) -> HTTPException:
+        return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error))
+
+    @app.get("/api/channel-policies")
+    def channel_policies(_username: CurrentUser, session: Db) -> dict[str, Any]:
+        return {
+            "items": channel_admin.list_channel_policies(session),
+            "choices": channel_choices(),
+        }
+
+    @app.post("/api/channel-policies")
+    def create_channel_policy(
+        username: CurrentUser, session: Db, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        try:
+            with session.begin():
+                policy = channel_admin.create_channel(
+                    session, body, actor=username, now=datetime.fromtimestamp(clock(), UTC)
+                )
+                created = channel_admin.channel_row(policy)
+        except channel_admin.ChannelValueError as error:
+            raise channel_error(error) from error
+        return {"channel": created}
+
+    @app.put("/api/channel-policies/{channel_id}/{topic_id}")
+    def update_channel_policy(
+        username: CurrentUser,
+        session: Db,
+        channel_id: int,
+        topic_id: int,
+        body: dict[str, Any],
+    ) -> dict[str, Any]:
+        try:
+            with session.begin():
+                changes = channel_admin.update_channel(
+                    session,
+                    channel_id,
+                    topic_id,
+                    body,
+                    actor=username,
+                    now=datetime.fromtimestamp(clock(), UTC),
+                )
+        except channel_admin.ChannelValueError as error:
+            raise channel_error(error) from error
+        except LookupError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="找不到這個頻道"
+            ) from error
+        return {"changes": changes}
 
     @app.get("/api/pnl/summary")
     def pnl_summary(
