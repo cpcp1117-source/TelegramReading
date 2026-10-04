@@ -31,6 +31,13 @@ _ENTRY_REFERENCE_KEYWORDS = ("進場", "进场", "entry", "@", "附近")
 _STOP_KEYWORDS = ("止損", "止损", "stop loss", "sl")
 _TAKE_PROFIT_KEYWORDS = ("止盈", "目標價", "目标价", "目標", "目标", "take profit", "tp")
 _CANCEL_KEYWORDS = ("取消", "平倉", "平仓", "cancel", "close")
+# The author flags a trade as risky ("#NMR 風險短多"): the draft starts at a smaller size. A
+# preceding 無/低/零, or a following 不大/可控/..., turns it into reassurance ("低風險",
+# "風險不大"), which must not shrink anything.
+_RISK_WARNING_PATTERN = re.compile(
+    r"(?<![無无低零])(?:風險|风险)(?!不大|不高|不太|很小|較小|较小|可控|有限)"
+    r"|(?<!no )(?<!low )(?<!zero )\brisk\b(?! is low| is small)"
+)
 
 _NUMBER_PATTERN = re.compile(r"\d+(?:\.\d+)?")
 _NUMBER_WINDOW = 20
@@ -70,6 +77,7 @@ class ParsedFields:
     cancel_detected: bool
     cancel_span: EvidenceSpan | None
     is_signal_attempt: bool
+    risk_flagged: bool = False
 
 
 def _find_numbers_after(
@@ -171,6 +179,10 @@ def _extract_cancel(lower_text: str) -> tuple[bool, EvidenceSpan | None]:
     return False, None
 
 
+def _extract_risk_flag(lower_text: str) -> bool:
+    return _RISK_WARNING_PATTERN.search(lower_text) is not None
+
+
 def parse_fields(normalized_text: str) -> ParsedFields:
     """Extract side/entry/SL/TP/cancel from one message's normalized text.
 
@@ -221,6 +233,7 @@ def parse_fields(normalized_text: str) -> ParsedFields:
         cancel_detected=cancel_detected,
         cancel_span=cancel_span,
         is_signal_attempt=is_signal_attempt,
+        risk_flagged=_extract_risk_flag(lower_text),
     )
 
 

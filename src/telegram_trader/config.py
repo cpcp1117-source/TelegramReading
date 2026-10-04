@@ -222,6 +222,16 @@ class Settings(BaseSettings):
             "SETUP_DEFAULT_POSITION_SIZE_PCT", "APP_SETUP_DEFAULT_POSITION_SIZE_PCT"
         ),
     )
+    # Suggested size for a signal whose author flags it as risky (e.g. "#NMR 風險短多"); the
+    # user can still change it per trade before approving.
+    risk_flagged_position_size_pct: Decimal = Field(
+        default=Decimal("0.05"),
+        gt=0,
+        le=1,
+        validation_alias=AliasChoices(
+            "RISK_FLAGGED_POSITION_SIZE_PCT", "APP_RISK_FLAGGED_POSITION_SIZE_PCT"
+        ),
+    )
     setup_confirm_interval: Literal["5m", "15m", "30m", "1h"] = Field(
         default="15m",
         validation_alias=AliasChoices("SETUP_CONFIRM_INTERVAL", "APP_SETUP_CONFIRM_INTERVAL"),

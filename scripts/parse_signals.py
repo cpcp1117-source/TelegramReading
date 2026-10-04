@@ -20,7 +20,11 @@ def main() -> int:
     configure_logging(settings.log_level)
     engine = create_db_engine(settings)
     try:
-        results = run_signal_parsing(create_session_factory(engine), batch_size=args.batch_size)
+        results = run_signal_parsing(
+            create_session_factory(engine),
+            batch_size=args.batch_size,
+            risk_flagged_size_pct=settings.risk_flagged_position_size_pct,
+        )
         for result in results:
             print(
                 f"channel_id={result.channel_id} topic_id={result.topic_id} "

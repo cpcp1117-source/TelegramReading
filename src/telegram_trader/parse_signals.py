@@ -207,6 +207,7 @@ def _insert(
     link_method: str | None,
     parser_version: str,
     expires_at: datetime,
+    suggested_size_pct: Decimal | None = None,
 ) -> None:
     session.execute(
         pg_insert(NormalizedSignalRow)
@@ -230,6 +231,7 @@ def _insert(
             link_method=link_method,
             parser_version=parser_version,
             expires_at=expires_at,
+            suggested_size_pct=suggested_size_pct,
         )
         .on_conflict_do_nothing(index_elements=["raw_message_id", "parser_version"])
     )
@@ -241,6 +243,7 @@ def _process_one(
     raw_row: TelegramMessageVersion,
     target: SignalTarget,
     version: str,
+    risk_flagged_size_pct: Decimal | None = None,
 ) -> bool:
     """Parse one (normalized_content, telegram_message_version) pair.
 
@@ -279,6 +282,7 @@ def _process_one(
             link_method="REPLY",
             parser_version=version,
             expires_at=_compute_expires_at(raw_row.source_date),
+            suggested_size_pct=parent.suggested_size_pct,
         )
         return True
 
@@ -317,6 +321,7 @@ def _process_one(
             link_method="REPLY",
             parser_version=version,
             expires_at=_compute_expires_at(raw_row.source_date),
+            suggested_size_pct=parent.suggested_size_pct,
         )
         return True
 
@@ -346,6 +351,7 @@ def _process_one(
         link_method=None,
         parser_version=version,
         expires_at=_compute_expires_at(raw_row.source_date),
+        suggested_size_pct=risk_flagged_size_pct if parsed.risk_flagged else None,
     )
     return True
 
@@ -356,6 +362,7 @@ def run_signal_parsing(
     batch_size: int = 500,
     version: str = CURRENT_PARSER_VERSION,
     normalizer_version: str = CURRENT_NORMALIZER_VERSION,
+    risk_flagged_size_pct: Decimal | None = None,
 ) -> list[SignalParsingResult]:
     """Parse committed `normalized_content` rows (EXECUTION_SIGNAL channels only)
 
@@ -409,7 +416,9 @@ def run_signal_parsing(
                 )
                 last_raw_message_id = checkpoint.last_raw_message_id if checkpoint else ""
                 for content_row, raw_row in rows:
-                    if _process_one(session, content_row, raw_row, target, version):
+                    if _process_one(
+                        session, content_row, raw_row, target, version, risk_flagged_size_pct
+                    ):
                         processed_count += 1
                     else:
                         skipped_count += 1

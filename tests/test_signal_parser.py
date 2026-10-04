@@ -185,3 +185,20 @@ def test_determine_status_pending_market_data_never_reaches_validated() -> None:
 
 def test_determine_status_valid_symbol_and_side_is_validated() -> None:
     assert determine_status("VALID", "LONG") == "VALIDATED"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("#NMR 風險短多", True),
+        ("NMR 风险 做空", True),
+        ("high risk long btc", True),
+        ("NMR 低風險短多", False),
+        ("無風險套利 多", False),
+        ("NMR 多 風險不大", False),
+        ("no risk long", False),
+        ("BTC 多 市價進場", False),
+    ],
+)
+def test_risk_flag_is_detected_only_for_a_warning(text: str, expected: bool) -> None:
+    assert parse_fields(text).risk_flagged is expected

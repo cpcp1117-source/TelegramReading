@@ -21,6 +21,8 @@ from telegram_trader.config import Settings
 from telegram_trader.db import create_db_engine, create_session_factory
 from telegram_trader.draft_edit import EntryEdit
 from telegram_trader.models import (
+    ChannelPolicy,
+    NormalizedContent,
     NormalizedSignal,
     SignalDecisionEvent,
     SignalDecisionRequest,
@@ -28,6 +30,8 @@ from telegram_trader.models import (
 )
 from telegram_trader.models import RiskDecision as RiskDecisionRow
 from telegram_trader.models import TradeIntent as TradeIntentRow
+from telegram_trader.normalize_content import run_normalization
+from telegram_trader.parse_signals import run_signal_parsing
 from telegram_trader.signal_decisions import (
     DraftValues,
     create_edit,
@@ -70,7 +74,8 @@ def engine() -> Iterator[Engine]:
                 "TRUNCATE TABLE outbox_delivery_receipts, outbox_events, "
                 "signal_decision_edits, signal_decision_events, signal_decision_requests, "
                 "normalized_signals, normalized_content, telegram_message_versions, "
-                "trading_pause_decisions, risk_config_snapshot, audit_events "
+                "trading_pause_decisions, risk_config_snapshot, audit_events, "
+                "channel_policies, signal_parse_checkpoints "
                 "RESTART IDENTITY CASCADE"
             )
         )
@@ -322,3 +327,54 @@ def test_receive_lag_is_checked_for_live_signals_but_not_monitor_built_drafts(
         factory, settings=_settings(), market_data_client=FakeMarket("100"), clock=lambda: NOW
     )
     assert draft.verdict == "APPROVED"
+
+
+def test_risk_flagged_signal_gets_the_smaller_suggested_size(
+    engine: Engine, tmp_path: Path
+) -> None:
+    """A signal the author flags as risky ("風險") starts at the smaller size; others do not."""
+    factory = create_session_factory(engine)
+    with factory.begin() as session:
+        session.add(
+            ChannelPolicy(
+                channel_id=CHANNEL,
+                topic_id=0,
+                label="exec",
+                channel_type="EXECUTION_SIGNAL",
+                symbol_scope_mode="STATIC_ALLOWLIST",
+                allowed_symbols=["BTCUSDT"],
+                automation_authorization="GRANTED",
+                gate_decision="ENABLED",
+            )
+        )
+    processor = TelegramMessageProcessor(
+        factory, MediaStore(tmp_path / "media"), frozenset({(CHANNEL, None)})
+    )
+    for message_id, body in ((1, "BTC 風險 多 市價進場"), (2, "BTC 多 市價進場")):
+        processor.process(
+            TelegramMessageInput(
+                channel_id=CHANNEL,
+                message_id=message_id,
+                event_kind="NEW",
+                source_date=POSTED,
+                received_at=POSTED,
+                text=body,
+                content_type="text",
+            )
+        )
+    run_normalization(factory)
+
+    run_signal_parsing(factory, risk_flagged_size_pct=Decimal("0.05"))
+
+    with factory() as session:
+        sizes = {
+            row.raw_message_id: row.suggested_size_pct
+            for row in session.scalars(select(NormalizedSignal))
+        }
+        texts = {
+            row.raw_message_id: row.normalized_text
+            for row in session.scalars(select(NormalizedContent))
+        }
+    by_text = {texts[raw_id]: size for raw_id, size in sizes.items()}
+    assert by_text["BTC 風險 多 市價進場"] == Decimal("0.0500")
+    assert by_text["BTC 多 市價進場"] is None
