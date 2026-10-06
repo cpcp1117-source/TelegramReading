@@ -21,8 +21,8 @@ function Read-DotEnvValue {
     return $value
 }
 
-$password = Read-DotEnvValue -Key 'POSTGRES_PASSWORD'
-if (-not $password) { throw 'POSTGRES_PASSWORD not found in .env' }
+$dbSecret = Read-DotEnvValue -Key 'POSTGRES_PASSWORD'
+if (-not $dbSecret) { throw 'POSTGRES_PASSWORD not found in .env' }
 
 $env:PYTHONUTF8 = '1'
 $env:PYTHONPATH = Join-Path $root 'src'
@@ -32,7 +32,7 @@ $env:APP_DATABASE_HOST = '127.0.0.1'
 $env:APP_DATABASE_PORT = '5432'
 $env:APP_DATABASE_NAME = 'telegram_trader'
 $env:APP_DATABASE_USER = 'postgres'
-$env:APP_DATABASE_PASSWORD = $password
+$env:APP_DATABASE_PASSWORD = $dbSecret
 # Task Scheduler may start with a thinner PATH than an interactive shell; `codex` lives here.
 $env:PATH = "$env:APPDATA\npm;$env:PATH"
 
