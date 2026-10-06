@@ -463,14 +463,10 @@ def order_detail(session: Session, intent_id: str) -> dict[str, Any] | None:
         if protection is None
         else _row(protection, ("protected_quantity", "stop_price", "state", "confirmed_at"))
     )
-    take_profit = session.scalar(
-        select(TakeProfitOrder).where(TakeProfitOrder.intent_id == intent_id)
-    )
-    detail["take_profit"] = (
-        None
-        if take_profit is None
-        else _row(take_profit, ("target_quantity", "target_price", "state", "confirmed_at"))
-    )
+    detail["take_profits"] = [
+        _row(level, ("level_index", "target_quantity", "target_price", "state", "confirmed_at"))
+        for level in _take_profit_levels(session, intent_id)
+    ]
     detail["events"] = [
         _row(event, ("event_id", "event_type", "payload", "recorded_at"))
         for event in session.scalars(
@@ -482,6 +478,17 @@ def order_detail(session: Session, intent_id: str) -> dict[str, Any] | None:
         )
     ]
     return detail
+
+
+def _take_profit_levels(session: Session, intent_id: str) -> list[TakeProfitOrder]:
+    """Every take-profit level of an intent, nearest target first (one row per level)."""
+    return list(
+        session.scalars(
+            select(TakeProfitOrder)
+            .where(TakeProfitOrder.intent_id == intent_id)
+            .order_by(TakeProfitOrder.level_index)
+        )
+    )
 
 
 # ---------------------------------------------------------------- positions
@@ -508,9 +515,7 @@ def list_open_positions(session: Session, mark_price: MarkPriceFetcher) -> list[
         protection = session.scalar(
             select(ProtectionOrder).where(ProtectionOrder.intent_id == row.intent_id)
         )
-        take_profit = session.scalar(
-            select(TakeProfitOrder).where(TakeProfitOrder.intent_id == row.intent_id)
-        )
+        take_profits = _take_profit_levels(session, row.intent_id)
         opened_at = session.scalar(
             select(OrderLifecycle.transitioned_at).where(
                 OrderLifecycle.intent_id == row.intent_id, OrderLifecycle.state == "FILLED"
@@ -536,8 +541,10 @@ def list_open_positions(session: Session, mark_price: MarkPriceFetcher) -> list[
                 "entry_price": to_json(entry_price),
                 "stop_price": to_json(protection.stop_price) if protection else None,
                 "stop_state": protection.state if protection else None,
-                "take_profit_price": to_json(take_profit.target_price) if take_profit else None,
-                "take_profit_state": take_profit.state if take_profit else None,
+                "take_profits": [
+                    {"price": to_json(level.target_price), "state": level.state}
+                    for level in take_profits
+                ],
                 "mark_price": to_json(mark),
                 "unrealized_pnl": to_json(unrealized.quantize(Decimal("0.0001")))
                 if unrealized is not None

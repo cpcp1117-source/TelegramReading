@@ -76,6 +76,7 @@ from telegram_trader.models import (
 from telegram_trader.models import NormalizedContent as NormalizedContentRow
 from telegram_trader.models import NormalizedSignal as NormalizedSignalRow
 from telegram_trader.models import RiskDecision as RiskDecisionRow
+from telegram_trader.models import TakeProfitOrder as TakeProfitOrderRow
 from telegram_trader.models import Thesis as ThesisRow
 from telegram_trader.models import TradeIntent as TradeIntentRow
 from telegram_trader.normalize_content import NormalizationResult, run_normalization
@@ -3771,3 +3772,36 @@ async def test_collector_picks_up_channel_added_from_web(engine: Engine) -> None
     assert client.disconnects == 1
     assert await collector.reload_policy_once(factory, [configured]) == []
     assert client.disconnects == 1  # already collecting: no second reconnect
+
+
+def test_console_lists_every_take_profit_level_in_order(engine: Engine) -> None:
+    factory = create_session_factory(engine)
+    intent = _open_protected_position(factory, 999)
+    with factory.begin() as session:
+        session.execute(
+            text("DELETE FROM take_profit_order WHERE intent_id = :id"), {"id": intent.intent_id}
+        )
+        for level, price, state in ((1, "130", "PENDING"), (0, "120", "CONFIRMED")):
+            session.add(
+                TakeProfitOrderRow(
+                    take_profit_row_id=f"tp-level-{level}",
+                    intent_id=intent.intent_id,
+                    level_index=level,
+                    target_quantity=Decimal("0.5"),
+                    target_price=Decimal(price),
+                    state=state,
+                )
+            )
+
+    with factory() as session:
+        detail = console_records.order_detail(session, intent.intent_id)
+        positions = console_records.list_open_positions(session, lambda _symbol: None)
+    assert detail is not None
+    assert [(t["level_index"], t["target_price"], t["state"]) for t in detail["take_profits"]] == [
+        (0, "120", "CONFIRMED"),
+        (1, "130", "PENDING"),
+    ]
+    assert positions[0]["take_profits"] == [
+        {"price": "120", "state": "CONFIRMED"},
+        {"price": "130", "state": "PENDING"},
+    ]

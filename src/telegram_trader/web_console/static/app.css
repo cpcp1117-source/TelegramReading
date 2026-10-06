@@ -506,3 +506,4 @@ input.changed { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(47, 111,
 button.danger { color: var(--bad); border-color: var(--bad); }
 .save-status.bad { color: var(--bad); }
 .filters input[type="checkbox"] { min-width: 0; }
+.tp-levels { display: inline-flex; flex-direction: column; gap: 2px; }

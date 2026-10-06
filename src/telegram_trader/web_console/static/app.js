@@ -565,13 +565,21 @@ async function orderDrawer(intentId) {
     ? el("ul", { class: "timeline" }, d.lifecycle.map((row) =>
       el("li", {}, [el("span", { class: "when" }, fmtTime(row.transitioned_at)), badge("state", row.state), row.transition_reason ? ` ${row.transition_reason}` : ""])))
     : el("p", { class: "muted" }, "尚未執行。"));
-  if (d.protection || d.take_profit) {
+  if (d.protection || d.take_profits.length) {
     nodes.push(el("h3", {}, "停損 / 停利單"), kv([
       ["停損價", d.protection ? d.protection.stop_price : "—"],
+      ["停損數量", d.protection ? d.protection.protected_quantity : "—"],
       ["停損狀態", d.protection ? badge("orderState", d.protection.state) : "—"],
-      ["停利價", d.take_profit ? d.take_profit.target_price : "—"],
-      ["停利狀態", d.take_profit ? badge("orderState", d.take_profit.state) : "—"],
     ]));
+    if (d.take_profits.length) {
+      nodes.push(table([
+        { title: "停利", render: (t) => `第 ${t.level_index + 1} 個` },
+        { title: "價格", key: "target_price", num: true },
+        { title: "數量", key: "target_quantity", num: true },
+        { title: "狀態", render: (t) => badge("orderState", t.state) },
+        { title: "確認時間", render: (t) => fmtTime(t.confirmed_at) },
+      ], d.take_profits));
+    }
   }
   if (d.exchange_orders.length) {
     nodes.push(el("h3", {}, "交易所訂單"), table([
@@ -613,7 +621,12 @@ async function renderPositions(container) {
     { title: "標記價", key: "mark_price", num: true },
     { title: "未實現損益 (USDT)", render: (r) => pnlCell(r.unrealized_pnl), num: true },
     { title: "停損", render: (r) => el("span", {}, [fmtNum(r.stop_price), " ", r.stop_state ? badge("orderState", r.stop_state) : ""]) },
-    { title: "停利", render: (r) => el("span", {}, [fmtNum(r.take_profit_price), " ", r.take_profit_state ? badge("orderState", r.take_profit_state) : ""]) },
+    {
+      title: "停利",
+      render: (r) => (r.take_profits.length
+        ? el("span", { class: "tp-levels" }, r.take_profits.map((t) => el("span", {}, [t.price, " ", badge("orderState", t.state)])))
+        : "—"),
+    },
     { title: "狀態", render: (r) => badge("state", r.state) },
   ], rows, (row) => openDrawer(`開單 ${row.symbol}`, () => orderDrawer(row.intent_id)), "目前沒有持倉"));
 }
