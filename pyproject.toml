@@ -72,6 +72,8 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 "src/telegram_trader/setup_monitor.py" = ["RUF001"]
 "src/telegram_trader/setup_extraction.py" = ["RUF001"]
 "src/telegram_trader/draft_edit.py" = ["RUF001"]
+"src/telegram_trader/status_events.py" = ["RUF001"]
+"src/telegram_trader/setup_status_events.py" = ["RUF001"]
 "tests/test_control_bot.py" = ["RUF001"]
 "tests/test_channel_admin.py" = ["RUF001"]
 

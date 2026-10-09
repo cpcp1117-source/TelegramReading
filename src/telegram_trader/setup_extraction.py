@@ -14,6 +14,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import select, update
@@ -37,13 +38,21 @@ from telegram_trader.models import (
     TelegramMessageVersion,
 )
 from telegram_trader.models import NormalizedContent as NormalizedContentRow
+from telegram_trader.models import TelegramMessageVersion as RawMessage
 from telegram_trader.openai_client import OpenAiClientError
 from telegram_trader.outbox import append_outbox_event
+from telegram_trader.setup_status_events import apply_status_event
+from telegram_trader.status_events import StatusKind, classify_status_message
 from telegram_trader.thesis_extraction import ThesisExtractionTarget, load_thesis_targets
 
 LOGGER = logging.getLogger(__name__)
 
 SETUP_EVENT_PREFIX = "setup_"
+_AI_STATUS_KINDS: dict[str, StatusKind] = {
+    "TARGET_HIT": "TARGET_HIT",
+    "CANCEL": "CANCEL",
+    "EXIT": "EXIT",
+}
 _ACTIVE_STATUSES = ("WATCHING", "ZONE_TOUCHED")
 _SYMBOL_SNAPSHOT_MAX_AGE_SECONDS = 24 * 3600.0
 _CONTEXT_WINDOW = timedelta(hours=24)
@@ -153,6 +162,43 @@ def _payload_for(setup: ParsedSetup, *, summary_zh: str, setup_id: str) -> dict[
     }
 
 
+def _is_repeat_of_recent_setup(
+    session: Session,
+    row: NormalizedContentRow,
+    setup: ParsedSetup,
+    source_date: datetime,
+    expiry_hours: int,
+) -> bool:
+    """The same idea (symbol, side, entry zone, stop, targets) was already stored in this topic.
+
+    A repeat must neither be created again nor restart the monitoring clock: an analyst's "Tp1 !!"
+    reply made the AI re-describe the unchanged setup, which re-armed ideas that had finished.
+    Closed ones count too -- a finished or called-off idea does not come back by being repeated.
+    """
+    targets = [{"low": str(tp.low), "high": str(tp.high)} for tp in setup.take_profits]
+    earlier = session.scalars(
+        select(AnalysisSetup).where(
+            AnalysisSetup.channel_id == row.channel_id,
+            _topic_condition(AnalysisSetup.topic_id, row.topic_id or 0),
+            AnalysisSetup.symbol == setup.symbol,
+            AnalysisSetup.side == setup.side,
+            AnalysisSetup.entry_zone_low == setup.entry_zone.low,
+            AnalysisSetup.entry_zone_high == setup.entry_zone.high,
+            AnalysisSetup.valid_from >= source_date - timedelta(hours=expiry_hours),
+            AnalysisSetup.valid_from <= source_date,
+        )
+    )
+    return any(
+        existing.stop_value == setup.stop_value
+        and [
+            {"low": str(Decimal(str(tp["low"]))), "high": str(Decimal(str(tp["high"])))}
+            for tp in existing.take_profits
+        ]
+        == [{"low": str(Decimal(tp["low"])), "high": str(Decimal(tp["high"]))} for tp in targets]
+        for existing in earlier
+    )
+
+
 def _store_setups(
     session: Session,
     *,
@@ -169,6 +215,8 @@ def _store_setups(
     for index, setup in enumerate(parsed_setups):
         setup_id = setup_id_for(row.content_id, index, CURRENT_SETUP_SCHEMA_VERSION, model)
         if session.get(AnalysisSetup, setup_id) is not None:
+            continue
+        if _is_repeat_of_recent_setup(session, row, setup, source_date, expiry_hours):
             continue
         # A newer idea for the same symbol/side in this topic replaces the older one; an idea
         # older than one already being watched is stored closed and never announced.
@@ -336,6 +384,22 @@ def run_setup_extraction(
                         target.policy, media_review_status=row.media_review_status
                     ).allowed:
                         skipped += 1
+                    elif (status_kind := classify_status_message(row.normalized_text)) is not None:
+                        # "Tp1 !!", "先撤單", "離場": an event about an earlier idea, never a
+                        # new one, and obvious enough that no AI call is needed.
+                        raw_message = session.get(RawMessage, row.raw_message_id)
+                        if raw_message is not None:
+                            apply_status_event(
+                                session,
+                                kind=status_kind,
+                                content=row,
+                                raw=raw_message,
+                                source_date=source_date,
+                                valid_symbols=valid_symbols,
+                                now=now,
+                                expiry_hours=expiry_hours,
+                            )
+                        processed += 1
                     else:
                         context = _context_for(
                             session, target, source_date, row.content_id, context_message_count
@@ -371,6 +435,25 @@ def run_setup_extraction(
                             )
                             skipped += 1
                         else:
+                            ai_status = _AI_STATUS_KINDS.get(parsed.message_kind)
+                            if ai_status is not None:
+                                # The AI recognised a status report the keyword classifier missed.
+                                raw_message = session.get(RawMessage, row.raw_message_id)
+                                if raw_message is not None:
+                                    apply_status_event(
+                                        session,
+                                        kind=ai_status,
+                                        content=row,
+                                        raw=raw_message,
+                                        source_date=source_date,
+                                        valid_symbols=valid_symbols,
+                                        now=now,
+                                        expiry_hours=expiry_hours,
+                                        extra_symbol=parsed.refers_to_symbol,
+                                    )
+                                processed += 1
+                                done.add(row.content_id)
+                                continue
                             for reason in parsed.rejected:
                                 LOGGER.warning(
                                     "setup rejected by validation",

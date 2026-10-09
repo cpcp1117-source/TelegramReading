@@ -51,6 +51,12 @@ _SETUP_FIELDS = frozenset(
     }
 )
 _TOP_LEVEL_FIELDS = frozenset({"summary_zh", "setups"})
+_OPTIONAL_TOP_LEVEL_FIELDS = frozenset({"message_kind", "refers_to_symbol"})
+_ALLOWED_MESSAGE_KINDS = frozenset({"NEW_OR_UPDATE", "TARGET_HIT", "CANCEL", "EXIT", "OTHER"})
+
+# A still-waiting setup is closed once price has covered this fraction of the way from the entry
+# zone to the first take-profit: the move happened without us (user decision 2026-10-07).
+TARGET_PROGRESS_CANCEL_FRACTION = Decimal("0.8")
 
 SETUP_SYSTEM_PROMPT = (
     "你是交易分析整理助手。輸入是 Telegram 分析頻道的『最新訊息』，"
@@ -66,6 +72,11 @@ SETUP_SYSTEM_PROMPT = (
     "6) 原文說「如果先跌到/漲到目標就撤單」才把 cancel_if_target_reached_first 設為 true。"
     "7) symbol 用 Binance USDT 永續格式，例如 DOTUSDT；原文的價格數字一律用數字型別。"
     "8) evidence_quotes 必須是輸入文字中逐字出現的片段。summary_zh 用繁體中文 3 到 5 行摘要。"
+    "9) 先判斷最新訊息的 message_kind：NEW_OR_UPDATE（新的或更新的交易情境）、"
+    "TARGET_HIT（回報停利目標已達，例如 Tp1、Tp🔥、記得減倉）、CANCEL（撤單、取消）、"
+    "EXIT（離場、止損出場）、OTHER（閒聊或一般市場評論）。"
+    "除了 NEW_OR_UPDATE，其他類型的 setups 都必須是空陣列，不可把狀態回報當成新情境。"
+    "refers_to_symbol 填訊息指的幣種（Binance USDT 永續格式），訊息沒有提到就填 null。"
 )
 
 
@@ -76,9 +87,11 @@ def _decimal_field() -> dict[str, Any]:
 SETUP_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": sorted(_TOP_LEVEL_FIELDS),
+    "required": sorted(_TOP_LEVEL_FIELDS | _OPTIONAL_TOP_LEVEL_FIELDS),
     "properties": {
         "summary_zh": {"type": "string"},
+        "message_kind": {"type": "string", "enum": sorted(_ALLOWED_MESSAGE_KINDS)},
+        "refers_to_symbol": {"type": ["string", "null"]},
         "setups": {
             "type": "array",
             "items": {
@@ -149,6 +162,8 @@ class ParsedSetupResponse:
     summary_zh: str
     setups: list[ParsedSetup]
     rejected: list[str] = field(default_factory=list)
+    message_kind: str = "NEW_OR_UPDATE"
+    refers_to_symbol: str | None = None
 
 
 def _to_decimal(value: Any, *, name: str) -> Decimal:
@@ -278,7 +293,7 @@ def parse_setup_response(
     """Validate the AI's JSON. One bad setup goes to `rejected`; it never poisons the rest."""
     if not isinstance(raw, dict):
         raise SetupValidationError("response is not a JSON object")
-    unknown = set(raw) - _TOP_LEVEL_FIELDS
+    unknown = set(raw) - _TOP_LEVEL_FIELDS - _OPTIONAL_TOP_LEVEL_FIELDS
     if unknown:
         raise SetupValidationError(f"unknown top-level field(s): {sorted(unknown)}")
     missing = _TOP_LEVEL_FIELDS - set(raw)
@@ -286,6 +301,21 @@ def parse_setup_response(
         raise SetupValidationError(f"missing required field(s): {sorted(missing)}")
     if not isinstance(raw["summary_zh"], str) or not isinstance(raw["setups"], list):
         raise SetupValidationError("summary_zh must be a string and setups a list")
+
+    message_kind = raw.get("message_kind", "NEW_OR_UPDATE")
+    if message_kind not in _ALLOWED_MESSAGE_KINDS:
+        raise SetupValidationError(f"invalid message_kind: {message_kind!r}")
+    refers_to_symbol = raw.get("refers_to_symbol")
+    if refers_to_symbol is not None and not isinstance(refers_to_symbol, str):
+        raise SetupValidationError("refers_to_symbol must be a string or null")
+    if message_kind != "NEW_OR_UPDATE":
+        # A status report (target hit, cancel, exit) or chatter never creates a setup.
+        return ParsedSetupResponse(
+            summary_zh=raw["summary_zh"],
+            setups=[],
+            message_kind=message_kind,
+            refers_to_symbol=refers_to_symbol,
+        )
 
     setups: list[ParsedSetup] = []
     rejected: list[str] = []
@@ -297,7 +327,13 @@ def parse_setup_response(
             continue
         if parsed is not None:
             setups.append(parsed)
-    return ParsedSetupResponse(summary_zh=raw["summary_zh"], setups=setups, rejected=rejected)
+    return ParsedSetupResponse(
+        summary_zh=raw["summary_zh"],
+        setups=setups,
+        rejected=rejected,
+        message_kind=message_kind,
+        refers_to_symbol=refers_to_symbol,
+    )
 
 
 # --------------------------------------------------------------------------- market rules
@@ -358,25 +394,36 @@ def _is_confirmed(state: SetupState, candle: Candle) -> bool:
     return candle.low <= zone.high and candle.close > candle.open and candle.close > zone.low
 
 
+def _target_mostly_reached(state: SetupState, candle: Candle) -> bool:
+    """Price covered `TARGET_PROGRESS_CANCEL_FRACTION` of entry zone -> first target, before entry.
+
+    Measured from the zone edge nearest the target to the first target's nearest edge. Always on:
+    it used to depend on the AI ticking `cancel_if_target_first`, which it left off for exactly the
+    setups that ran away (C98 rose 22% past both targets while still "watching").
+    """
+    target = state.first_target
+    if target is None:
+        return False
+    zone = state.entry_zone
+    if state.side == "SHORT":
+        reference, goal = zone.low, target.high
+        if goal >= reference:
+            return False
+        return candle.low <= reference - (reference - goal) * TARGET_PROGRESS_CANCEL_FRACTION
+    reference, goal = zone.high, target.low
+    if goal <= reference:
+        return False
+    return candle.high >= reference + (goal - reference) * TARGET_PROGRESS_CANCEL_FRACTION
+
+
 def _is_invalidated(state: SetupState, candle: Candle) -> str | None:
     if state.side == "SHORT":
         if state.stop_value is not None and candle.high >= state.stop_value:
             return "STOP_REACHED"
-        if (
-            state.cancel_if_target_first
-            and state.first_target is not None
-            and candle.low <= state.first_target.high
-        ):
-            return "TARGET_REACHED_FIRST"
-    else:
-        if state.stop_value is not None and candle.low <= state.stop_value:
-            return "STOP_REACHED"
-        if (
-            state.cancel_if_target_first
-            and state.first_target is not None
-            and candle.high >= state.first_target.low
-        ):
-            return "TARGET_REACHED_FIRST"
+    elif state.stop_value is not None and candle.low <= state.stop_value:
+        return "STOP_REACHED"
+    if _target_mostly_reached(state, candle):
+        return "TARGET_REACHED_FIRST"
     return None
 
 

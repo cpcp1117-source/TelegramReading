@@ -409,6 +409,9 @@ _SETUP_EVENT_TITLES: dict[str, str] = {
     "setup_triggered": "✅ 條件確認——開單草稿已建立",
     "setup_invalidated": "🚫 情境失效，停止監控",
     "setup_expired": "⌛ 情境已過期，停止監控",
+    "setup_draft_voided": "🗑️ 分析師更新了狀況，這筆開單草稿作廢（現在核准也不會下單）",
+    "setup_analyst_notice": "📣 分析師回報（跟你已核准的單有關）",
+    "setup_status_ambiguous": "❓ 分析師的狀態訊息看不出指的是哪個情境，系統沒有動作",
     "setup_worker_error": "🔥 分析監控服務出錯（會持續重試，恢復時會再通知）",
     "setup_worker_recovered": "✅ 分析監控服務已恢復",
     "setup_extraction_failed": "⚠️ AI 整理這則分析訊息失敗（會自動重試；持續失敗請檢查 AI 登入）",
@@ -425,6 +428,8 @@ _SETUP_FIELD_LABELS: dict[str, str] = {
     "confirm_rule": "確認條件",
     "risk_notes": "風險提醒",
     "reason": "原因",
+    "hint": "提醒",
+    "candidates": "可能是",
     "note": "說明",
     "step": "步驟",
     "error": "錯誤",
@@ -435,6 +440,17 @@ _HANDLED_FOOTER = "✅ 已標記為已處理"
 _DAILY_LOSS_REMINDER_HEADER = "⏰ 提醒：每日虧損熔斷 5 分鐘內尚未選擇"
 
 
+_SETUP_REASON_LABELS: dict[str, str] = {
+    "ANALYST_TARGET_HIT": "分析師回報停利目標已達",
+    "ANALYST_CANCEL": "分析師說撤單",
+    "ANALYST_EXIT": "分析師說離場",
+    "TARGET_REACHED_FIRST": "還沒進場價格就走完到第一個停利約八成，行情已經跑掉",
+    "STOP_REACHED": "價格先碰到停損",
+    "EXPIRED": "已逾期",
+    "TRIGGER_STALE": "確認發生太久，已不適合進場",
+}
+
+
 def format_setup_notification(event: OutboxEvent) -> str:
     """Renders one analysis-setup outbox event (`setup_*`) as a Telegram message."""
     title = _SETUP_EVENT_TITLES.get(event.event_type, f"ℹ️ {event.event_type}")
@@ -442,6 +458,8 @@ def format_setup_notification(event: OutboxEvent) -> str:
     for key, value in event.payload.items():
         if value is None or key == "setup_id":
             continue
+        if key == "reason":
+            value = _SETUP_REASON_LABELS.get(str(value), value)
         lines.append(f"{_SETUP_FIELD_LABELS.get(key, key)}: {value}")
     return "\n".join(lines)
 

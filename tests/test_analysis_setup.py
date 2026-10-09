@@ -211,14 +211,59 @@ def test_stop_reached_before_entry_invalidates() -> None:
     assert result.status == "INVALIDATED" and result.reason == "STOP_REACHED"
 
 
-def test_target_reached_first_cancels_only_when_requested() -> None:
-    candles = [_candle(0, "1.14", "1.15", "1.09", "1.10")]
+def test_price_running_80_percent_to_the_first_target_cancels_regardless_of_the_ai_flag() -> None:
+    # SHORT zone 1.18-1.20, first target 1.08-1.10: 80% of the way from 1.18 to 1.10 is 1.116.
+    runs_away = [_candle(0, "1.14", "1.15", "1.11", "1.12")]  # low 1.11 <= 1.116
+    not_yet = [_candle(0, "1.14", "1.15", "1.12", "1.13")]  # low 1.12 > 1.116
 
-    cancelled = evaluate_candles(_state(), candles, now=NOW)
-    ignored = evaluate_candles(_state(cancel_if_target_first=False), candles, now=NOW)
+    for flag in (True, False):  # the AI's cancel_if_target_first no longer matters
+        result = evaluate_candles(_state(cancel_if_target_first=flag), runs_away, now=NOW)
+        assert (result.status, result.reason) == ("INVALIDATED", "TARGET_REACHED_FIRST")
+        assert evaluate_candles(_state(cancel_if_target_first=flag), not_yet, now=NOW).status == (
+            "WATCHING"
+        )
 
-    assert cancelled.reason == "TARGET_REACHED_FIRST"
-    assert ignored.status == "WATCHING"
+
+def test_long_setup_cancels_when_price_runs_80_percent_to_the_first_target() -> None:
+    state = _state(
+        side="LONG",
+        entry_zone=PriceZone(Decimal("100"), Decimal("102")),
+        stop_value=Decimal("97"),
+        first_target=PriceZone(Decimal("110"), Decimal("112")),
+    )  # 80% of the way from 102 to 110 is 108.4
+
+    assert evaluate_candles(state, [_candle(0, "103", "108.5", "103", "108")], now=NOW).reason == (
+        "TARGET_REACHED_FIRST"
+    )
+    assert evaluate_candles(state, [_candle(0, "103", "108", "103", "107")], now=NOW).status == (
+        "WATCHING"
+    )
+
+
+def test_message_kind_status_report_never_creates_setups() -> None:
+    response = {
+        "summary_zh": "Tp1 達標",
+        "message_kind": "TARGET_HIT",
+        "refers_to_symbol": "SOLUSDT",
+        "setups": [_setup()],  # even if the AI returned one, a status report creates none
+    }
+
+    parsed = parse_setup_response(response, valid_symbols=SYMBOLS, source_text=SOURCE)
+
+    assert parsed.setups == []
+    assert (parsed.message_kind, parsed.refers_to_symbol) == ("TARGET_HIT", "SOLUSDT")
+
+
+def test_message_kind_defaults_to_new_or_update_and_is_validated() -> None:
+    plain = parse_setup_response(_response(_setup()), valid_symbols=SYMBOLS, source_text=SOURCE)
+    assert plain.message_kind == "NEW_OR_UPDATE" and len(plain.setups) == 1
+
+    with pytest.raises(SetupValidationError):
+        parse_setup_response(
+            {"summary_zh": "x", "setups": [], "message_kind": "SHRUG"},
+            valid_symbols=SYMBOLS,
+            source_text=SOURCE,
+        )
 
 
 def test_candles_before_valid_from_and_unclosed_candles_are_ignored() -> None:
