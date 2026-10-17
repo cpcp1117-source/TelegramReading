@@ -55,6 +55,12 @@ def _event_id(subject: str, event_type: str, discriminator: str) -> str:
     return hashlib.sha256(f"{subject}:{event_type}:{discriminator}".encode()).hexdigest()
 
 
+def _message_key(raw: TelegramMessageVersion) -> str:
+    """One Telegram message, whatever its edit version: an edit that leaves the text unchanged
+    (reaction/entity touch-ups) must not notify a second time; a real text change still does."""
+    return f"{raw.channel_id}:{raw.message_id}:{raw.content_hash}"
+
+
 def _emit(
     session: Session,
     *,
@@ -63,9 +69,10 @@ def _emit(
     aggregate_type: str,
     discriminator: str,
     payload: dict[str, Any],
+    dedupe_subject: str | None = None,
 ) -> None:
     """Idempotent: the same status message never notifies the same subject twice."""
-    event_id = _event_id(subject, event_type, discriminator)
+    event_id = _event_id(dedupe_subject or subject, event_type, discriminator)
     if session.get(OutboxEvent, event_id) is not None:
         return
     append_outbox_event(
@@ -226,7 +233,8 @@ def apply_status_event(
             subject=raw.source_event_id,
             event_type="setup_status_ambiguous",
             aggregate_type="normalized_content",
-            discriminator=kind,
+            discriminator=f"{kind}:{_message_key(raw)}",
+            dedupe_subject=f"{raw.channel_id}",
             payload={
                 "note": quote,
                 "candidates": ", ".join(f"{symbol} {side}" for symbol, side in sorted(pairs)),
@@ -249,7 +257,7 @@ def apply_status_event(
                 subject=setup.setup_id,
                 event_type="setup_invalidated",
                 aggregate_type="analysis_setup",
-                discriminator=raw.source_event_id,
+                discriminator=_message_key(raw),
                 payload=base,
             )
             action, touched = "CLOSED", touched + 1
@@ -262,7 +270,7 @@ def apply_status_event(
                 subject=setup.setup_id,
                 event_type="setup_analyst_notice",
                 aggregate_type="analysis_setup",
-                discriminator=raw.source_event_id,
+                discriminator=_message_key(raw),
                 payload={
                     **base,
                     "note": f"{label}：{quote}",
@@ -276,7 +284,7 @@ def apply_status_event(
                 subject=setup.setup_id,
                 event_type="setup_draft_voided",
                 aggregate_type="analysis_setup",
-                discriminator=raw.source_event_id,
+                discriminator=_message_key(raw),
                 payload={**base, "note": f"{label}，這筆草稿已作廢：{quote}"},
             )
             action, touched = "DRAFT_VOIDED", touched + 1
